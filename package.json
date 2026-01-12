@@ -1,0 +1,234 @@
+{
+  "name": "code-pause",
+  "displayName": "CodePause",
+  "description": "Pause. Review. Own your code. Balance AI assistance with skill development.",
+  "version": "0.1.0",
+  "publisher": "codepause",
+  "icon": "resources/codepause-icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codepause-dev/codepause-extension"
+  },
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=20.0.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codePause.openDashboard",
+        "title": "CodePause: Open Dashboard",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "codePause.startOnboarding",
+        "title": "CodePause: Start Onboarding",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "codePause.resetOnboarding",
+        "title": "CodePause: Reset Onboarding (Debug)"
+      },
+      {
+        "command": "codePause.openSettings",
+        "title": "CodePause: Open Settings",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "codePause.snooze",
+        "title": "CodePause: Snooze Alerts for Today",
+        "icon": "$(bell-slash)"
+      },
+      {
+        "command": "codePause.refreshDashboard",
+        "title": "CodePause: Refresh Dashboard",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "codePause.showStats",
+        "title": "CodePause: Show Quick Stats"
+      },
+      {
+        "command": "codePause.showDatabaseInfo",
+        "title": "CodePause: Show Database Info"
+      },
+      {
+        "command": "codePause.showProgression",
+        "title": "CodePause: Show Progression & Level",
+        "icon": "$(star)"
+      },
+      {
+        "command": "codePause.showAchievements",
+        "title": "CodePause: Show Achievements",
+        "icon": "$(trophy)"
+      },
+      {
+        "command": "codePause.showAdvancedSettings",
+        "title": "CodePause: Advanced Settings",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "codePause.exportData",
+        "title": "CodePause: Export Data",
+        "icon": "$(export)"
+      },
+      {
+        "command": "codePause.importData",
+        "title": "CodePause: Import Data",
+        "icon": "$(import)"
+      },
+      {
+        "command": "codePause.showSnoozeStatus",
+        "title": "CodePause: Show Snooze Status"
+      },
+      {
+        "command": "codePause.changeExperienceLevel",
+        "title": "CodePause: Change Experience Level",
+        "icon": "$(account)"
+      },
+      {
+        "command": "codePause.forceFullScan",
+        "title": "CodePause: Force Full Scan (Find All AI Files)",
+        "icon": "$(search)"
+      },
+      {
+        "command": "codePause.resetAchievements",
+        "title": "CodePause: Reset Achievements",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "codePause.clearAllData",
+        "title": "CodePause: Clear All Data",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "codePause.cleanupOldData",
+        "title": "CodePause: Cleanup Old Data (Test 30-Day Retention)",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "codePause.checkThresholds",
+        "title": "CodePause: Check Thresholds",
+        "icon": "$(bell)"
+      },
+      {
+        "command": "codePause.testNotification",
+        "title": "CodePause: Test Notifications (Debug)",
+        "icon": "$(bell-dot)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codePause",
+          "title": "CodePause",
+          "icon": "resources/codepause-activitybar.svg"
+        }
+      ]
+    },
+    "views": {
+      "codePause": [
+        {
+          "type": "webview",
+          "id": "codePause.dashboardView",
+          "name": "Dashboard"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "codePause.refreshDashboard",
+          "when": "view == codePause.dashboardView",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CodePause",
+      "properties": {
+        "codePause.experienceLevel": {
+          "type": "string",
+          "enum": [
+            "junior",
+            "mid",
+            "senior"
+          ],
+          "default": "mid",
+          "description": "Your developer experience level (affects notification thresholds)"
+        },
+        "codePause.blindApprovalThreshold": {
+          "type": "number",
+          "default": 2000,
+          "description": "Time in milliseconds to consider an acceptance as insufficient review"
+        },
+        "codePause.alertFrequency": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": "medium",
+          "description": "How frequently you want to receive guidance notifications"
+        },
+        "codePause.enableGamification": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable achievements and progress tracking (legacy feature)"
+        },
+        "codePause.enableTelemetry": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable anonymous usage telemetry to help improve CodePause. No code or personal data is collected. Respects VS Code's global telemetry setting."
+        },
+        "codePause.anonymizePaths": {
+          "type": "boolean",
+          "default": true,
+          "description": "Anonymize file paths in stored data"
+        },
+        "codePause.trackedTools": {
+          "type": "object",
+          "default": {
+            "copilot": true,
+            "cursor": true,
+            "claudeCode": true
+          },
+          "description": "Which AI tools to track (unified tracking enabled by default)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "jest --coverage",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage --coverageReporters=text-lcov | coveralls"
+  },
+  "devDependencies": {
+    "@jest/globals": "^30.2.0",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.19.27",
+    "@types/sql.js": "^1.4.9",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.x",
+    "@typescript-eslint/parser": "^6.x",
+    "@vscode/test-electron": "^2.3.0",
+    "eslint": "^8.x",
+    "jest": "^30.2.0",
+    "ts-jest": "^29.4.6",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "date-fns": "^4.1.0",
+    "sql.js": "^1.13.0"
+  }
+}

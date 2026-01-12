@@ -1,0 +1,30 @@
+name: Greetings
+
+on: [pull_request_target, issues]
+
+jobs:
+  greeting:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/first-interaction@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          issue-message: |
+            Thank you for opening your first issue! We appreciate your contribution to CodePause.
+
+            A maintainer will review your issue soon. In the meantime:
+            - Check our [Contributing Guide](https://github.com/codepause-dev/codepause-extension/blob/main/CONTRIBUTING.md)
+            - Join our [Discussions](https://github.com/codepause-dev/codepause-extension/discussions)
+          pr-message: |
+            Thank you for opening your first pull request! We're excited to review your contribution.
+
+            Please ensure:
+            - [ ] Tests pass (`npm test`)
+            - [ ] Linter passes (`npm run lint`)
+            - [ ] You've updated documentation if needed
+            - [ ] You've added tests for new features
+
+            A maintainer will review your PR as soon as possible.

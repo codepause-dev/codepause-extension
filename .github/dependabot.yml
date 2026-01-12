@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # Check for npm package updates
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      # Check weekly on Mondays at 00:00 UTC
+      interval: "weekly"
+      day: "monday"
+      time: "00:00"
+    open-pull-requests-limit: 10
+    # Don't update devDependencies automatically
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    labels:
+      - "dependencies"
+      - "dependabot"
+    reviewers:
+      - "khaledesmail"
+    # Automatically commit if tests pass
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"

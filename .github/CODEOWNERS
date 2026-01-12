@@ -1,0 +1,21 @@
+# Code owners for automatic review assignment
+
+# Organization owner
+* @khaledesmail khaled.esmail222@gmail.com
+
+# Core source code
+/src/ @khaledesmail
+
+# Tests
+/src/__tests__/ @khaledesmail
+
+# Documentation
+/docs/ @khaledesmail
+*.md @khaledesmail
+
+# GitHub config
+/.github/ @khaledesmail
+
+# Package config
+/package.json @khaledesmail
+/package-lock.json @khaledesmail

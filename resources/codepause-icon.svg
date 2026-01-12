@@ -1,0 +1,16 @@
+<svg width="256" height="256" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background with calming blue -->
+  <rect width="128" height="128" rx="24" fill="#4A90E2" />
+  
+  <!-- Brain outline -->
+  <g transform="translate(64, 64)">
+    <!-- Main brain shape -->
+    <path d="M -20 -5 Q -25 -15, -18 -22 Q -10 -28, -2 -24 Q 5 -28, 12 -24 Q 20 -28, 25 -20 Q 30 -10, 25 0 Q 28 8, 22 15 Q 15 20, 8 18 Q 3 22, -3 22 Q -10 22, -15 18 Q -22 15, -25 8 Q -30 0, -25 -8 Z" fill="white" opacity="0.95" />
+    
+    <!-- Pause symbol (take a moment to review) -->
+    <g opacity="0.9">
+      <rect x="-6" y="-8" width="4" height="16" rx="1.5" fill="#4A90E2" />
+      <rect x="2" y="-8" width="4" height="16" rx="1.5" fill="#4A90E2" />
+    </g>
+  </g>
+</svg>

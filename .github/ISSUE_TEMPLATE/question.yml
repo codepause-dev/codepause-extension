@@ -1,0 +1,52 @@
+name: Question
+description: Ask a question about CodePause
+title: "[Question]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have a question? We're here to help!
+
+        **Before asking:**
+        - Check the [FAQ](https://github.com/codepause-dev/codepause-extension#frequently-asked-questions)
+        - Search [existing issues](https://github.com/codepause-dev/codepause-extension/issues)
+        - Check [Discussions](https://github.com/codepause-dev/codepause-extension/discussions)
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your Question
+      description: What would you like to know?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Any additional context that might help us answer your question
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Question Category
+      options:
+        - Installation & Setup
+        - Usage & Features
+        - Configuration
+        - Troubleshooting
+        - Development & Contributing
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I have searched existing issues and discussions
+          required: true
+        - label: I have read the documentation
+          required: false

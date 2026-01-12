@@ -1,0 +1,16 @@
+.vscode/**
+.vscode-test/**
+src/**
+.gitignore
+.yarnrc
+vsc-extension-quickstart.md
+**/tsconfig.json
+**/.eslintrc.json
+**/*.map
+**/*.ts
+**/.DS_Store
+**/MindfulCode_Implementation_Plan.md
+
+# Exclude most of node_modules but keep node-sqlite3-wasm (needed for WASM files)
+**/node_modules/**
+!node_modules/node-sqlite3-wasm/**
