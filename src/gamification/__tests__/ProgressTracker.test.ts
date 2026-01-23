@@ -119,7 +119,7 @@ describe('ProgressTracker', () => {
 
     it('should handle invalid level gracefully', () => {
       expect(tracker.getLevelTitle(99)).toBe('Mindful Coder');
-      expect(tracker.getLevelIcon(99)).toBe('🤖');
+      expect(tracker.getLevelIcon(99)).toBe('⏸️');
     });
   });
 

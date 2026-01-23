@@ -7,26 +7,69 @@ import { DeveloperLevel } from '../../types';
 import * as vscode from 'vscode';
 
 // Mock vscode
-jest.mock('vscode', () => ({
-  window: {
-    showInformationMessage: jest.fn(),
-    showQuickPick: jest.fn(),
-    showWarningMessage: jest.fn(),
-    showErrorMessage: jest.fn()
-  },
-  commands: {
-    executeCommand: jest.fn()
-  }
-}), { virtual: true });
+jest.mock('vscode', () => {
+  const mockPanel = {
+    reveal: jest.fn(),
+    dispose: jest.fn(),
+    webview: {
+      html: '',
+      onDidReceiveMessage: jest.fn(),
+      postMessage: jest.fn()
+    },
+    onDidDispose: jest.fn()
+  };
+
+  return {
+    ViewColumn: {
+      One: 1,
+      Two: 2,
+      Three: 3
+    },
+    window: {
+      createWebviewPanel: jest.fn().mockReturnValue(mockPanel),
+      showInformationMessage: jest.fn(),
+      showQuickPick: jest.fn(),
+      showWarningMessage: jest.fn(),
+      showErrorMessage: jest.fn()
+    },
+    commands: {
+      executeCommand: jest.fn()
+    },
+    Uri: {
+      file: (str: string) => str,
+      parse: (str: string) => str
+    }
+  };
+}, { virtual: true });
 
 describe('OnboardingManager', () => {
   let manager: OnboardingManager;
   let mockContext: any;
   let mockConfigManager: any;
+  let mockOnDidReceiveMessageCallback: any;
+  let mockPanel: any;
 
   beforeEach(() => {
     // Reset mocks
     jest.clearAllMocks();
+
+    // Create mock panel
+    mockPanel = {
+      reveal: jest.fn(),
+      dispose: jest.fn(),
+      webview: {
+        html: '',
+        onDidReceiveMessage: jest.fn((callback) => {
+          mockOnDidReceiveMessageCallback = callback;
+        }),
+        postMessage: jest.fn()
+      },
+      onDidDispose: jest.fn((_callback) => {
+        // Auto-dispose on trigger
+      })
+    };
+
+    (vscode.window.createWebviewPanel as jest.Mock).mockReturnValue(mockPanel);
 
     // Create mock context
     mockContext = {
@@ -38,7 +81,8 @@ describe('OnboardingManager', () => {
         packageJSON: {
           version: '0.2.0'
         }
-      }
+      },
+      subscriptions: []
     };
 
     // Create mock config manager
@@ -132,89 +176,81 @@ describe('OnboardingManager', () => {
 
   describe('start - successful completion', () => {
     it('should complete full onboarding flow', async () => {
-      // Mock successful flow
-      (vscode.window.showInformationMessage as jest.Mock)
-        .mockResolvedValueOnce('Get Started') // Welcome
-        .mockResolvedValueOnce({ title: 'Next' }) // Tour slide 1
-        .mockResolvedValueOnce({ title: 'Next' }) // Tour slide 2
-        .mockResolvedValueOnce({ title: 'Finish Tour' }) // Tour slide 3
-        .mockResolvedValueOnce('Start Coding'); // Dashboard preview
-
-      (vscode.window.showQuickPick as jest.Mock).mockResolvedValueOnce({
-        label: '$(code) Mid-Level Developer',
-        level: DeveloperLevel.Mid
-      });
-
       await manager.start();
+
+      // Verify webview panel was created
+      expect(vscode.window.createWebviewPanel).toHaveBeenCalledWith(
+        'codePauseOnboarding',
+        'CodePause Setup',
+        vscode.ViewColumn.One,
+        expect.objectContaining({
+          enableScripts: true,
+          retainContextWhenHidden: true
+        })
+      );
+
+      // Simulate user completing onboarding with Mid level
+      await mockOnDidReceiveMessageCallback({
+        command: 'complete',
+        data: { experienceLevel: DeveloperLevel.Mid }
+      });
 
       expect(mockConfigManager.setExperienceLevel).toHaveBeenCalledWith(DeveloperLevel.Mid);
       expect(mockContext.globalState.update).toHaveBeenCalledWith('onboarding.completed', true);
       expect(mockContext.globalState.update).toHaveBeenCalledWith('onboarding.completedAt', expect.any(Number));
+      expect(mockPanel.dispose).toHaveBeenCalled();
     });
 
     it('should save selected experience level', async () => {
-      (vscode.window.showInformationMessage as jest.Mock)
-        .mockResolvedValueOnce('Get Started')
-        .mockResolvedValueOnce({ title: 'Next' })
-        .mockResolvedValueOnce({ title: 'Next' })
-        .mockResolvedValueOnce({ title: 'Finish Tour' })
-        .mockResolvedValueOnce('Start Coding');
-
-      (vscode.window.showQuickPick as jest.Mock).mockResolvedValueOnce({
-        label: '$(mortar-board) Junior Developer',
-        level: DeveloperLevel.Junior
-      });
-
       await manager.start();
+
+      // Simulate user completing onboarding with Junior level
+      await mockOnDidReceiveMessageCallback({
+        command: 'complete',
+        data: { experienceLevel: DeveloperLevel.Junior }
+      });
 
       expect(mockConfigManager.setExperienceLevel).toHaveBeenCalledWith(DeveloperLevel.Junior);
     });
+
+    it('should handle skip command', async () => {
+      await manager.start();
+
+      // Simulate user skipping onboarding
+      await mockOnDidReceiveMessageCallback({ command: 'skip' });
+
+      expect(mockContext.globalState.update).toHaveBeenCalledWith('onboarding.skipped', true);
+      expect(mockContext.globalState.update).toHaveBeenCalledWith('onboarding.skippedAt', expect.any(Number));
+      expect(mockPanel.dispose).toHaveBeenCalled();
+    });
+
+    it('should handle openDashboard command', async () => {
+      await manager.start();
+
+      // Simulate user clicking Open Dashboard
+      await mockOnDidReceiveMessageCallback({ command: 'openDashboard' });
+
+      expect(vscode.commands.executeCommand).toHaveBeenCalledWith('codePause.openDashboard');
+    });
   });
 
-  describe('start - skip scenarios', () => {
-    it('should handle immediate skip on welcome', async () => {
-      (vscode.window.showInformationMessage as jest.Mock).mockResolvedValueOnce('Skip');
-      (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce('Yes, Skip');
-
+  describe('start - reveal existing panel', () => {
+    it('should reveal existing panel if already open', async () => {
       await manager.start();
 
-      expect(mockContext.globalState.update).toHaveBeenCalledWith('onboarding.skipped', true);
-      expect(mockContext.globalState.update).not.toHaveBeenCalledWith('onboarding.completed', true);
-    });
-
-    it('should handle skip during experience level selection', async () => {
-      (vscode.window.showInformationMessage as jest.Mock).mockResolvedValueOnce('Get Started');
-      (vscode.window.showQuickPick as jest.Mock).mockResolvedValueOnce(undefined); // User canceled
-      (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce('Yes, Skip');
-
+      // Start again - should reveal existing panel
       await manager.start();
 
-      expect(mockContext.globalState.update).toHaveBeenCalledWith('onboarding.skipped', true);
-    });
-
-    it('should handle skip during tour', async () => {
-      (vscode.window.showInformationMessage as jest.Mock)
-        .mockResolvedValueOnce('Get Started')
-        .mockResolvedValueOnce({ title: 'Skip Tour' }); // Skip on first tour slide
-
-      (vscode.window.showQuickPick as jest.Mock).mockResolvedValueOnce({
-        label: '$(code) Mid-Level Developer',
-        level: DeveloperLevel.Mid
-      });
-
-      (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce('Yes, Skip');
-
-      await manager.start();
-
-      expect(mockContext.globalState.update).toHaveBeenCalledWith('onboarding.skipped', true);
+      expect(mockPanel.reveal).toHaveBeenCalled();
+      expect(vscode.window.createWebviewPanel).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('error handling', () => {
     it('should handle errors gracefully', async () => {
-      (vscode.window.showInformationMessage as jest.Mock).mockRejectedValueOnce(
-        new Error('Test error')
-      );
+      (vscode.window.createWebviewPanel as jest.Mock).mockImplementationOnce(() => {
+        throw new Error('Test error');
+      });
 
       await manager.start();
 
@@ -225,53 +261,11 @@ describe('OnboardingManager', () => {
     });
 
     it('should not throw on error', async () => {
-      (vscode.window.showInformationMessage as jest.Mock).mockRejectedValueOnce(
-        new Error('Critical error')
-      );
+      (vscode.window.createWebviewPanel as jest.Mock).mockImplementationOnce(() => {
+        throw new Error('Critical error');
+      });
 
       await expect(manager.start()).resolves.not.toThrow();
-    });
-  });
-
-  describe('dashboard opening', () => {
-    it('should complete onboarding when Open Dashboard is selected', async () => {
-      // Note: The actual dashboard opening happens in setTimeout which is hard to test
-      // This test verifies the flow completes successfully when user selects "Open Dashboard"
-      (vscode.window.showInformationMessage as jest.Mock)
-        .mockResolvedValueOnce('Get Started')
-        .mockResolvedValueOnce({ title: 'Next' })
-        .mockResolvedValueOnce({ title: 'Next' })
-        .mockResolvedValueOnce({ title: 'Finish Tour' })
-        .mockResolvedValueOnce('Open Dashboard');
-
-      (vscode.window.showQuickPick as jest.Mock).mockResolvedValueOnce({
-        label: '$(star) Senior Developer',
-        level: DeveloperLevel.Senior
-      });
-
-      await manager.start();
-
-      // Verify onboarding completed successfully
-      expect(mockContext.globalState.update).toHaveBeenCalledWith('onboarding.completed', true);
-      expect(mockConfigManager.setExperienceLevel).toHaveBeenCalledWith(DeveloperLevel.Senior);
-    });
-
-    it('should not open dashboard when user selects Start Coding', async () => {
-      (vscode.window.showInformationMessage as jest.Mock)
-        .mockResolvedValueOnce('Get Started')
-        .mockResolvedValueOnce({ title: 'Next' })
-        .mockResolvedValueOnce({ title: 'Next' })
-        .mockResolvedValueOnce({ title: 'Finish Tour' })
-        .mockResolvedValueOnce('Start Coding');
-
-      (vscode.window.showQuickPick as jest.Mock).mockResolvedValueOnce({
-        label: '$(code) Mid-Level Developer',
-        level: DeveloperLevel.Mid
-      });
-
-      await manager.start();
-
-      expect(vscode.commands.executeCommand).not.toHaveBeenCalled();
     });
   });
 });

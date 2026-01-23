@@ -42,11 +42,9 @@ export class AchievementSystem {
   }
 
   async checkAllAchievements(): Promise<void> {
-    // CRITICAL: Don't check achievements with insufficient data
-    // Require at least some real activity before triggering achievements
+    // Don't check achievements with insufficient data
     const eventCount = await this.metricsRepository.getRealUserEventCount();
     if (eventCount < 5) {
-      console.log(`[AchievementSystem] Insufficient data for achievements (${eventCount} events, need 5+)`);
       return;
     }
 

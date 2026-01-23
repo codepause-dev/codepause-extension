@@ -124,7 +124,7 @@ export class ProgressTracker {
       9: '✨'
     };
 
-    return icons[level] || '🤖';
+    return icons[level] || '⏸️';
   }
 
   async getLevelMessage(): Promise<string> {
