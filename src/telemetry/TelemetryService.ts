@@ -35,7 +35,10 @@ export class TelemetryService {
   private flushInterval: NodeJS.Timeout | null = null;
   private readonly flushIntervalMs = 5 * 60 * 1000; // 5 minutes
   private readonly maxBufferSize = 50;
-  private readonly endpointUrl = 'https://api.codepause.dev/telemetry';
+  // Update this to your production API URL if needed
+  // Local development: http://localhost:8000/api/v1/telemetry
+  // Production: 'https://api.codepause.dev/api/v1/telemetry'
+  private readonly endpointUrl = 'https://api.codepause.dev/api/v1/telemetry';
 
   constructor(private context: vscode.ExtensionContext) {
     this.enabled = this.isEnabled();
@@ -47,18 +50,14 @@ export class TelemetryService {
    */
   initialize(): void {
     if (!this.enabled) {
-      console.log('[Telemetry] Disabled by user or VS Code setting');
       return;
     }
 
-    // Flush events every 5 minutes
     this.flushInterval = setInterval(() => {
-      this.flush().catch(error => {
-        console.error('[Telemetry] Flush error:', error);
+      this.flush().catch(() => {
+        // Silent retry on next interval
       });
     }, this.flushIntervalMs);
-
-    console.log('[Telemetry] Initialized (anonymous mode)');
   }
 
   /**
@@ -87,14 +86,7 @@ export class TelemetryService {
       // Create anonymous hash based on machine ID
       const machineId = vscode.env.machineId;
       userId = crypto.createHash('sha256').update(machineId).digest('hex').substring(0, 16);
-      this.context.globalState.update('telemetry.userId', userId).then(
-        () => {
-          console.log('[Telemetry] Created anonymous user ID');
-        },
-        (error) => {
-          console.error('[Telemetry] Failed to save user ID:', error);
-        }
-      );
+      this.context.globalState.update('telemetry.userId', userId);
     }
 
     return userId;
@@ -118,8 +110,8 @@ export class TelemetryService {
 
     // Flush immediately if buffer is large
     if (this.eventBuffer.length >= this.maxBufferSize) {
-      this.flush().catch(error => {
-        console.error('[Telemetry] Flush error:', error);
+      this.flush().catch(() => {
+        // Silent retry on next interval
       });
     }
   }
@@ -189,14 +181,10 @@ export class TelemetryService {
       });
 
       if (!response.ok) {
-        console.warn('[Telemetry] Failed to send events:', response.statusText);
         // Put events back in buffer to retry
         this.eventBuffer.unshift(...events);
-      } else {
-        console.log(`[Telemetry] Sent ${events.length} events`);
       }
-    } catch (error) {
-      console.error('[Telemetry] Error sending events:', error);
+    } catch {
       // Put events back in buffer to retry
       this.eventBuffer.unshift(...events);
     }
@@ -213,14 +201,7 @@ export class TelemetryService {
     });
 
     if (isFirstTime) {
-      this.context.globalState.update('hasActivatedBefore', true).then(
-        () => {
-          // Success
-        },
-        (error) => {
-          console.error('[Telemetry] Failed to mark activation:', error);
-        }
-      );
+      this.context.globalState.update('hasActivatedBefore', true);
     }
   }
 

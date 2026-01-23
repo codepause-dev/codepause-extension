@@ -292,7 +292,7 @@ describe('TelemetryService', () => {
       await Promise.resolve();
 
       expect(global.fetch).toHaveBeenCalledWith(
-        'https://api.codepause.dev/telemetry',
+        'https://api.codepause.dev/api/v1/telemetry',
         expect.objectContaining({
           method: 'POST',
           headers: expect.objectContaining({

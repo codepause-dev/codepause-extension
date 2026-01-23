@@ -27,15 +27,12 @@ export class AlertEngine {
 
   async shouldShowBlindApprovalAlert(detection: BlindApprovalDetection): Promise<boolean> {
     // Only high confidence detections trigger alerts
-    // TODO: Consider allowing medium confidence for very fast acceptances (< 100ms)
     if (detection.confidence !== 'high') {
-      console.log('[AlertEngine] Blind approval alert blocked: confidence is', detection.confidence, '(requires high)');
       return false;
     }
 
     // Check if alerts are snoozed
     if (await this.configRepo.isSnoozed()) {
-      console.log('[AlertEngine] Blind approval alert blocked: alerts are snoozed');
       return false;
     }
 
@@ -44,17 +41,6 @@ export class AlertEngine {
       AlertType.GentleNudge,
       ALERT_RATE_LIMITS[AlertType.GentleNudge]
     );
-    
-    if (!canShow) {
-      const history = await this.configRepo.getAlertHistory(AlertType.GentleNudge);
-      if (history) {
-        const timeSince = Date.now() - history.lastShown;
-        console.log('[AlertEngine] Blind approval alert blocked: rate limited', {
-          timeSince: Math.floor(timeSince / 1000) + 's',
-          limit: ALERT_RATE_LIMITS[AlertType.GentleNudge] / 1000 + 's'
-        });
-      }
-    }
     
     return canShow;
   }
@@ -189,11 +175,10 @@ export class AlertEngine {
   }
 
   createThresholdAlert(metrics: DailyMetrics, thresholdType: string, threshold: number): Alert | null {
-    // CRITICAL: Don't create alerts with insufficient data
+    // Don't create alerts with insufficient data
     // Require at least 50 lines of code to make percentage meaningful
     const totalLines = metrics.totalAILines + metrics.totalManualLines;
     if (totalLines < 50) {
-      console.log(`[AlertEngine] Insufficient data for threshold alert (${totalLines} lines, need 50+)`);
       return null;
     }
 

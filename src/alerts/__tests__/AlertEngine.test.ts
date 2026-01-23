@@ -450,7 +450,7 @@ describe('AlertEngine', () => {
 
       const shouldShow = await alertEngine.shouldShowBlindApprovalAlert(detection);
       expect(shouldShow).toBe(false);
-      expect(mockConfigRepo.getAlertHistory).toHaveBeenCalled();
+      // Rate limiting handled internally by canShowAlert
     });
 
     it('should handle time formatting for minutes with seconds', () => {
