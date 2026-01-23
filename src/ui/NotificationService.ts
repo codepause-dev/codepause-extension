@@ -23,7 +23,6 @@ export class NotificationService {
     
     // Check if already showing this alert (by ID)
     if (this.activeNotifications.has(alert.id)) {
-      console.log('[NotificationService] Duplicate alert blocked (same ID):', alert.id);
       return;
     }
 
@@ -33,11 +32,6 @@ export class NotificationService {
     const messageKey = `${alert.type}-${messageBase}`;
     const lastShown = this.recentAlertMessages.get(messageKey);
     if (lastShown && (now - lastShown) < 5000) {
-      console.log('[NotificationService] Duplicate alert blocked (same message within 5s):', {
-        message: alert.message.substring(0, 50) + '...',
-        timeSince: now - lastShown + 'ms',
-        alertId: alert.id
-      });
       return;
     }
 
@@ -48,12 +42,6 @@ export class NotificationService {
       const timeDeltaKey = `${alert.type}-timeDelta-${timeDeltaRange}`;
       const lastTimeDeltaShown = this.recentAlertMessages.get(timeDeltaKey);
       if (lastTimeDeltaShown && (now - lastTimeDeltaShown) < 5000) {
-        console.log('[NotificationService] Duplicate alert blocked (same timeDelta within 5s):', {
-          timeDelta,
-          timeDeltaRange,
-          timeSince: now - lastTimeDeltaShown + 'ms',
-          alertId: alert.id
-        });
         return;
       }
       this.recentAlertMessages.set(timeDeltaKey, now);
@@ -75,13 +63,6 @@ export class NotificationService {
       // Don't show alerts when snoozed (except achievements)
       return;
     }
-
-    console.log('[NotificationService] Showing alert:', {
-      id: alert.id,
-      type: alert.type,
-      title: alert.title,
-      message: alert.message.substring(0, 50) + '...'
-    });
 
     // Show notification based on type
     await this.displayNotification(alert);

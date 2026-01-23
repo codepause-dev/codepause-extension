@@ -71,7 +71,9 @@ export interface TrackingEvent {
   tool: AITool; // DEPRECATED: Use 'source' instead
   source?: CodeSource; // NEW: 'ai' or 'manual'
   eventType: EventType;
-  linesOfCode?: number;
+  linesOfCode?: number; // For metrics: AI lines added (positive only)
+  linesRemoved?: number; // Lines removed (positive value)
+  linesChanged?: number; // For review scoring: total lines changed (added + deleted)
   charactersCount?: number;
   acceptanceTimeDelta?: number; // milliseconds
   filePath?: string;
@@ -132,7 +134,7 @@ export interface DailyMetrics {
   totalAILines: number;
   totalManualLines: number;
   aiPercentage: number;
-  averageReviewTime: number;
+  averageReviewTime: number; // Inline completions only (milliseconds)
   sessionCount: number;
   toolBreakdown: Record<AITool, ToolMetrics>;
 
@@ -144,6 +146,10 @@ export interface DailyMetrics {
   unreviewedFiles?: string[];
   reviewedFileCount?: number;
   unreviewedFileCount?: number;
+
+  // Separate file review time metric (milliseconds)
+  averageFileReviewTime?: number; // Average time spent reviewing AI-generated files
+  reviewedFilesCount?: number; // Number of files reviewed
 }
 
 /**
@@ -212,7 +218,11 @@ export interface FileReviewStatus {
   reviewQuality: ReviewQuality;
   reviewScore: number; // 0-100
   isReviewed: boolean;
-  linesGenerated: number;
+  linesGenerated: number; // Total AI lines since file creation (cumulative, never resets)
+  linesChanged?: number; // Total lines changed (added + |deleted|) for review scoring
+  linesSinceReview?: number; // AI lines added since last review (resets to 0 when marked as reviewed)
+  linesAdded?: number; // Lines added since last review
+  linesRemoved?: number; // Lines removed since last review
   charactersCount: number;
   agentSessionId?: string;
   isAgentGenerated: boolean;
@@ -231,6 +241,88 @@ export interface FileReviewStatus {
   lastOpenedAt?: number;
   reviewSessionsCount: number;
   reviewedInTerminal: boolean; // TRUE if reviewed in terminal (CLI workflow)
+}
+
+// ==================== File Tree Types ====================
+
+/**
+ * File status in diff view
+ */
+export enum FileChangeStatus {
+  Added = 'added',
+  Modified = 'modified',
+  Deleted = 'deleted',
+  Unchanged = 'unchanged'
+}
+
+/**
+ * File tree node for hierarchical display
+ */
+export interface FileTreeNode {
+  /** Display name (file or folder name) */
+  name: string;
+
+  /** Full path from workspace root */
+  path: string;
+
+  /** Node type */
+  type: 'file' | 'directory';
+
+  /** Child nodes (only for directories) */
+  children: FileTreeNode[];
+
+  /** File data (only for file nodes) */
+  file?: FileReviewStatus;
+
+  /** Aggregated statistics for this node and all children */
+  stats: {
+    filesChanged: number;
+    filesReviewed: number;
+    linesAdded: number;
+    linesRemoved: number;
+  };
+
+  /** Whether directory is expanded in UI */
+  isExpanded: boolean;
+
+  /** Nesting depth (0 = root) */
+  depth: number;
+
+  /** File change status (for file nodes) */
+  status?: FileChangeStatus;
+}
+
+/**
+ * Diff statistics for file changes summary
+ */
+export interface DiffStatistics {
+  totalFiles: number;
+  totalAdditions: number;
+  totalDeletions: number;
+  totalChanges: number;
+  filesAdded: number;
+  filesModified: number;
+  filesDeleted: number;
+  reviewedFiles: number;
+  unreviewedFiles: number;
+  reviewProgress: number; // 0-100 percentage
+}
+
+/**
+ * Change bar visualization data
+ */
+export interface ChangeBarData {
+  /** Percentage width for additions (0-100) */
+  additionsWidth: number;
+
+  /** Percentage width for deletions (0-100) */
+  deletionsWidth: number;
+
+  /** Total changes for display */
+  totalChanges: number;
+
+  /** Whether to show the bar (false if no changes) */
+  showBar: boolean;
 }
 
 /**
@@ -472,6 +564,8 @@ export interface EventRecord {
   tool: string;
   event_type: string;
   lines_of_code: number | null;
+  lines_removed: number | null; // Lines removed (positive value)
+  lines_changed: number | null; // Total lines changed (added + |deleted|) for review scoring
   characters_count: number | null;
   acceptance_time_delta: number | null;
   file_path: string | null;
@@ -505,6 +599,8 @@ export interface DailyMetricsRecord {
   unreviewed_lines: number | null;
   unreviewed_percentage: number | null;
   agent_session_count: number | null;
+  average_file_review_time: number | null;
+  reviewed_files_count: number | null;
 }
 
 /**
@@ -607,6 +703,10 @@ export interface FileReviewStatusRecord {
   review_score: number;
   is_reviewed: number; // 0 or 1
   lines_generated: number;
+  lines_changed: number; // Total lines changed (added + |deleted|) for review scoring
+  lines_since_review: number; // AI lines added since last review (resets to 0 when marked as reviewed)
+  lines_added: number; // Lines added since last review
+  lines_removed: number; // Lines removed since last review
   characters_count: number;
   agent_session_id: string | null;
   is_agent_generated: number; // 0 or 1
@@ -623,6 +723,7 @@ export interface FileReviewStatusRecord {
   last_opened_at: number | null;
   review_sessions_count: number;
   reviewed_in_terminal: number; // 0 or 1
+  review_method: string | null; // 'manual' or 'automatic'
   created_at: number;
   updated_at: number;
 }
@@ -630,7 +731,7 @@ export interface FileReviewStatusRecord {
 // ==================== Tracker Interfaces ====================
 
 /**
- * Base tracker interface that all AI tool trackers must implement
+ * Base tracker interface that most of AI trackers must implement
  */
 export interface ITracker {
   readonly tool: AITool;

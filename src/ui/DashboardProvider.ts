@@ -8,8 +8,13 @@ import * as path from 'path';
 import { MetricsRepository } from '../storage/MetricsRepository';
 import { ConfigRepository } from '../storage/ConfigRepository';
 import { ThresholdManager } from '../core/ThresholdManager';
-import { DailyMetrics, ToolMetrics, AITool } from '../types';
+import { TelemetryService } from '../telemetry/TelemetryService';
+import { MetricsCollector } from '../core/MetricsCollector';
+import { DailyMetrics, ToolMetrics, AITool, FileTreeNode, DiffStatistics } from '../types';
 import { getDashboardHtml } from './DashboardHtml';
+import { DiffViewService } from './DiffViewService';
+import { FileTreeBuilder } from './FileTreeBuilder';
+import { DiffViewerHelper } from './DiffViewerHelper';
 
 export class DashboardProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'codePause.dashboardView';
@@ -18,16 +23,29 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
   private metricsRepository: MetricsRepository;
   private configRepository: ConfigRepository;
   private thresholdManager: ThresholdManager;
+  private telemetryService?: TelemetryService;
+  private metricsCollector?: MetricsCollector;
+  private diffViewService: DiffViewService;
+  private fileTreeBuilder: FileTreeBuilder;
+  private diffViewerHelper: DiffViewerHelper;
+  private directoryExpansionState: Map<string, boolean> = new Map();
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
     metricsRepository: MetricsRepository,
     configRepository: ConfigRepository,
-    thresholdManager: ThresholdManager
+    thresholdManager: ThresholdManager,
+    telemetryService?: TelemetryService,
+    metricsCollector?: MetricsCollector
   ) {
     this.metricsRepository = metricsRepository;
     this.configRepository = configRepository;
     this.thresholdManager = thresholdManager;
+    this.telemetryService = telemetryService;
+    this.metricsCollector = metricsCollector;
+    this.diffViewService = new DiffViewService();
+    this.fileTreeBuilder = new FileTreeBuilder();
+    this.diffViewerHelper = new DiffViewerHelper();
   }
 
   public resolveWebviewView(
@@ -39,10 +57,15 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
   ) {
     this._view = webviewView;
 
+    // BUG #4 FIX: Enable retainContextWhenHidden to preserve webview state (including scroll)
     webviewView.webview.options = {
       enableScripts: true,
       localResourceRoots: [this._extensionUri]
     };
+
+    // BUG #4 FIX: Set retainContextWhenHidden on the view itself
+    // This preserves scroll position and other state when view is hidden
+    (webviewView as any).retainContextWhenHidden = true;
 
     webviewView.webview.html = getDashboardHtml(webviewView.webview, this._extensionUri);
 
@@ -50,7 +73,8 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(async data => {
       switch (data.type) {
         case 'refresh':
-          await this.refresh();
+          // User-triggered refresh should be immediate (bypass debouncing)
+          await this.refresh(true);
           break;
         case 'export':
           await this.exportData();
@@ -70,6 +94,13 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
           await this.markFileAsReviewed(data.filePath, data.tool);
           await this.refresh();
           break;
+        case 'viewDiff':
+          await this.handleViewDiff(data.filePath);
+          break;
+        case 'toggleDirectory':
+          this.handleToggleDirectory(data.path);
+          await this.refresh();
+          break;
       }
     });
 
@@ -77,9 +108,44 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
     this.refresh();
   }
 
+  // BUG #3 FIX: Debounce dashboard refresh to prevent excessive queries
+  private refreshDebounceTimer: NodeJS.Timeout | undefined;
+  private readonly REFRESH_DEBOUNCE_MS = 3000; // 3-5 seconds as validated
+  private refreshCallCount = 0; // Debug counter
+
   public async refresh(forceHtmlUpdate: boolean = false) {
     if (!this._view) {
       return;
+    }
+
+    // BUG #3 FIX: Immediate refresh for user-triggered actions (force update)
+    if (forceHtmlUpdate) {
+      await this.refreshImmediate(forceHtmlUpdate);
+      return;
+    }
+
+    // BUG #3 FIX: Debounced refresh for automatic updates
+    if (this.refreshDebounceTimer) {
+      clearTimeout(this.refreshDebounceTimer);
+    }
+
+    this.refreshDebounceTimer = setTimeout(() => {
+      this.refreshImmediate(forceHtmlUpdate);
+      this.refreshDebounceTimer = undefined;
+    }, this.REFRESH_DEBOUNCE_MS);
+  }
+
+  // BUG #3 FIX: Immediate refresh (bypasses debouncing)
+  private async refreshImmediate(forceHtmlUpdate: boolean = false) {
+    if (!this._view) {
+      return;
+    }
+
+    // BUG #3 FIX: Track refresh count to detect infinite refresh loops
+    this.refreshCallCount++;
+    if (this.refreshCallCount > 100) {
+      console.error('[DashboardProvider] Possible infinite refresh loop detected! Refresh count:', this.refreshCallCount);
+      // Don't return - still allow refresh, but log the warning
     }
 
     try {
@@ -104,27 +170,14 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
   private async getDashboardData() {
     try {
       const today = this.getTodayDateString();
-      console.log('========================================');
-      console.log('[DashboardProvider] 📊 GETTING DASHBOARD DATA');
-      console.log('[DashboardProvider] 📅 Today:', today);
-      console.log('========================================');
-
       const threshold = this.thresholdManager.getConfig();
       const config = await this.configRepository.getUserConfig();
 
-      // Force aggregation of today's metrics to show latest data in chart
-      await this.metricsRepository.calculateDailyMetrics(today);
+      // Calculate and get today's metrics in one call (avoid double query)
+      const todayMetrics = await this.metricsRepository.calculateDailyMetrics(today) || this.getEmptyMetrics(today);
 
-      // Get today's metrics
-      const todayMetrics = await this.metricsRepository.getDailyMetrics(today) || this.getEmptyMetrics(today);
-
-      console.log('[DashboardProvider] 📊 Today metrics:', {
-        totalEvents: todayMetrics.totalEvents,
-        totalAiLines: todayMetrics.totalAILines,
-        totalManualLines: todayMetrics.totalManualLines,
-        aiPercentage: todayMetrics.aiPercentage,
-        reviewQualityScore: todayMetrics.reviewQualityScore
-      });
+      // Get yesterday's metrics for empty state continuity
+      const yesterdayMetrics = await this.metricsRepository.getYesterdayMetrics();
 
       // Get last 7 days metrics
       const last7Days = await this.getLast7DaysMetrics();
@@ -140,8 +193,8 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
       // Get snooze state
       const snoozeState = await this.configRepository.getSnoozeState();
 
-      // Calculate streak
-      const streakDays = await this.calculateStreak();
+      // Calculate streak (balanced usage days)
+      const streakDays = await this.metricsRepository.calculateStreakDays(config.experienceLevel);
 
       // Get review quality data
       const unreviewedFiles = await this.metricsRepository.getUnreviewedFiles(today);
@@ -154,8 +207,12 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
       // Get core metrics for improved dashboard
       const coreMetrics = await this.metricsRepository.getCoreMetrics(config.experienceLevel, threshold);
 
+      // NEW: Prepare file tree data
+      const fileTreeData = await this.prepareFileTreeData(today);
+
       const data = {
         today: todayMetrics,
+        yesterday: yesterdayMetrics,
         last7Days,
         trends,
         toolBreakdown,
@@ -168,40 +225,16 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
         terminalReviewedFiles,
         agentSessions,
         workspace,
-        coreMetrics
+        coreMetrics,
+        // NEW: File tree data
+        fileTree: fileTreeData.fileTree,
+        fileTreeStats: fileTreeData.fileTreeStats
       };
 
       return data;
     } catch (error) {
       console.error('CodePause: Error loading dashboard data:', error);
       throw error;
-    }
-  }
-
-  private async calculateStreak(): Promise<number> {
-    try {
-      const today = new Date();
-      let streak = 0;
-
-      // Check up to 30 days for performance (most streaks won't be longer than this)
-      for (let i = 0; i < 30; i++) {
-        const date = new Date(today);
-        date.setDate(date.getDate() - i);
-        const dateStr = date.toISOString().split('T')[0];
-
-        const metrics = await this.metricsRepository.getDailyMetrics(dateStr);
-
-        if (metrics && metrics.totalEvents > 0) {
-          streak++;
-        } else {
-          break; // Streak broken
-        }
-      }
-
-      return streak;
-    } catch (error) {
-      console.error('Error calculating streak:', error);
-      return 0;
     }
   }
 
@@ -270,7 +303,9 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
     for (const event of events) {
       const metadata = event.metadata as Record<string, unknown>;
       const detectionMethod = event.detectionMethod;
+      // AGENT MODE FIX: Count total AI activity (additions + deletions), not just additions
       const lines = event.linesOfCode || 0;
+      const totalAIActivity = (event.linesOfCode || 0) + (event.linesRemoved || 0);
 
       // CRITICAL FIX: Skip manual code events - they should NOT be counted in AI coding modes
       // Manual code is tracked separately in the manual vs AI metrics
@@ -278,13 +313,23 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
         continue;
       }
 
-      // Agent Mode: Files modified while closed
-      if (detectionMethod === 'external-file-change' || metadata?.closedFileModification || event.isAgentMode) {
-        modes.agent.lines += lines;
-        modes.agent.events++;
-      }
+      // Check if this is from an AI agent (Claude Code, etc.) vs user chat/paste
+      // Indicators of agent mode:
+      // - agentSessionId is set (from agent session tracking)
+      // - isAgentGenerated flag is true (in event or metadata)
+      // - tool is 'claude-code' or similar
+      // NOTE: isAgentMode is checked separately in the if-condition below
+      // NOTE: Do NOT use event.source === 'ai' here - inline completions also have source='ai'
+      const isFromAgent = event.agentSessionId ||
+                          (event as any).isAgentGenerated ||
+                          (metadata as any)?.isAgentGenerated ||
+                          event.tool === 'claude-code';
+
+      // CRITICAL: Check detectionMethod FIRST - it has absolute priority
+      // This ensures correct categorization even for old events with wrong flags
+
       // Inline Autocomplete: Real-time suggestions
-      else if (detectionMethod === 'inline-completion-api' || event.eventType === 'suggestion-accepted') {
+      if (detectionMethod === 'inline-completion-api' || event.eventType === 'suggestion-accepted') {
         modes.inline.lines += lines;
         modes.inline.events++;
         if (event.eventType === 'suggestion-accepted') {
@@ -294,15 +339,28 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
           }
         }
       }
-      // Chat/Paste Mode: Large code blocks
-      else if (detectionMethod === 'large-paste' || (detectionMethod === 'change-velocity' && lines > 50)) {
+      // Chat/Paste Mode: Large code blocks that are NOT from AI agents
+      // This captures user copy/paste from ChatGPT web, Claude web, etc.
+      // IMPORTANT: Check this BEFORE agent mode to override old isAgentMode flags
+      else if (detectionMethod === 'large-paste') {
         modes.chatPaste.lines += lines;
         modes.chatPaste.events++;
       }
+      // Agent Mode: Files modified while closed OR from AI agent tools
+      else if (detectionMethod === 'external-file-change' ||
+               metadata?.closedFileModification ||
+               event.isAgentMode ||
+               isFromAgent) {
+        modes.agent.lines += totalAIActivity; // Use totalAIActivity to include deletions
+        modes.agent.events++;
+      }
+      // Change-velocity detection is MEDIUM confidence - don't count it as a specific mode
+      // It was already filtered out by not being emitted (in UnifiedAITracker)
+      // If somehow it got into the DB, it's better to ignore it than misclassify it
       // Fallback: Unknown AI detection method, assume agent mode
       // (Should rarely hit this - indicates missing detection method on AI event)
       else if (lines > 0) {
-        modes.agent.lines += lines;
+        modes.agent.lines += totalAIActivity; // CONSISTENCY FIX: Use totalAIActivity like the main agent mode branch
         modes.agent.events++;
       }
     }
@@ -434,16 +492,143 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
       const today = this.getTodayDateString();
       const config = await this.configRepository.getUserConfig();
 
-      // Update the file review status to mark as reviewed
-      // Passes developer level to calculate expected review time
-      await this.metricsRepository.markFileAsReviewed(filePath, tool, today, config.experienceLevel);
+      // Update the file review status to mark as reviewed with MANUAL method
+      // This distinguishes from automatic review detection
+      await this.metricsRepository.markFileAsReviewed(
+        filePath,
+        tool,
+        today,
+        config.experienceLevel,
+        'manual' // NEW: Mark as manually reviewed (user clicked button)
+      );
+
+      // CRITICAL FIX: Update the in-memory cache to reflect the reviewed status
+      // This prevents stale cache from being used in subsequent event processing
+      // Without this, existingStatus would return stale data when next event arrives
+      if (this.metricsCollector) {
+        const fileReviewTracker = this.metricsCollector.getFileReviewTracker();
+        if (fileReviewTracker) {
+          const existingStatus = fileReviewTracker.getFileStatus(filePath, today, tool as any);
+          if (existingStatus) {
+            fileReviewTracker.updateFileStatus(filePath, today, tool as any, {
+              isReviewed: true,
+              reviewScore: 100,
+              reviewQuality: 'thorough' as any,
+              linesSinceReview: 0,
+              lastReviewedAt: Date.now()
+            });
+          } else {
+            // Create cache entry if none exists (e.g., after extension reload)
+            fileReviewTracker.trackFile({
+              filePath: filePath,
+              date: today,
+              tool: tool as any,
+              reviewQuality: 'thorough' as any,
+              reviewScore: 100,
+              isReviewed: true,
+              linesGenerated: 0,
+              linesChanged: 0,
+              linesSinceReview: 0,
+              charactersCount: 0,
+              isAgentGenerated: true,
+              wasFileOpen: true,
+              firstGeneratedAt: Date.now(),
+              lastReviewedAt: Date.now(),
+              totalReviewTime: 0,
+              modificationCount: 0,
+              totalTimeInFocus: 0,
+              scrollEventCount: 0,
+              cursorMovementCount: 0,
+              editsMade: false,
+              reviewSessionsCount: 1,
+              reviewedInTerminal: false
+            });
+          }
+        }
+      }
+
+      // Get session data from FileReviewSessionTracker if available
+      const sessionTracker = this.metricsCollector?.getFileReviewSessionTracker();
+      const session = sessionTracker?.getSession(filePath);
+
+      // Track telemetry event for manual review with session data
+      this.telemetryService?.track('file.reviewed', {
+        method: 'manual',
+        triggeredBy: 'user',
+        ...(session && {
+          timeInFocus: session.totalTimeInFocus,
+          reviewScore: session.currentReviewScore,
+          reviewQuality: session.currentReviewQuality
+        })
+      });
 
       const fileName = filePath.split('/').pop();
       vscode.window.showInformationMessage(`Marked ${fileName} as reviewed`);
     } catch (error) {
+      console.error('[CodePause] Mark as reviewed error:', error);
       vscode.window.showErrorMessage(`Failed to mark file as reviewed`);
-      console.error('Mark as reviewed error:', error);
     }
+  }
+
+  /**
+   * Handle view diff request
+   */
+  private async handleViewDiff(filePath: string): Promise<void> {
+    try {
+      await this.diffViewerHelper.openDiff(filePath);
+    } catch (error) {
+      console.error('[CodePause] View diff error:', error);
+      vscode.window.showErrorMessage(`Failed to open diff: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Handle directory toggle request
+   */
+  private handleToggleDirectory(path: string): void {
+    const currentState = this.directoryExpansionState.get(path);
+    // Default is expanded (true), so toggle to collapsed (false) if not set
+    this.directoryExpansionState.set(path, currentState === undefined ? false : !currentState);
+  }
+
+  /**
+   * Prepare file tree data for dashboard
+   */
+  private async prepareFileTreeData(date: string): Promise<{
+    fileTree: FileTreeNode;
+    fileTreeStats: DiffStatistics;
+  }> {
+    // Get unreviewed files
+    const allUnreviewedFiles = await this.metricsRepository.getUnreviewedFiles(date);
+
+    // FIX: Filter out files that weren't actually modified today
+    // Check: has changes AND timestamp is within today
+    const dayStart = new Date(date + 'T00:00:00.000Z').getTime();
+    const dayEnd = dayStart + 86399999;
+
+    const unreviewedFiles = allUnreviewedFiles.filter(file => {
+      const hasChanges = (file.linesAdded || 0) > 0 || (file.linesRemoved || 0) > 0;
+      if (!hasChanges) {
+        return false;
+      }
+      const timestamp = file.firstGeneratedAt || 0;
+      return timestamp >= dayStart && timestamp <= dayEnd;
+    });
+
+    // Get workspace root
+    const workspaceRoot = this.getWorkspaceInfo().path || '';
+
+    // Build file tree with current expansion state
+    const fileTree = this.fileTreeBuilder.build(
+      unreviewedFiles,
+      this.directoryExpansionState,
+      workspaceRoot
+    );
+
+    // Calculate statistics
+    const fileTreeStats = this.diffViewService.calculateStatistics(unreviewedFiles);
+
+    return { fileTree, fileTreeStats };
   }
 
   private getTodayDateString(): string {
@@ -472,5 +657,12 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
       path: primaryFolder.uri.fsPath,
       isMultiRoot: workspaceFolders.length > 1
     };
+  }
+
+  /**
+   * Clean up resources
+   */
+  public dispose(): void {
+    this.diffViewerHelper.dispose();
   }
 }

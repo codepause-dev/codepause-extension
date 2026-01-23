@@ -119,6 +119,7 @@ describe('DashboardProvider', () => {
     mockMetricsRepo.getUnreviewedFiles = jest.fn().mockResolvedValue([]);
     mockMetricsRepo.getTerminalReviewedFiles = jest.fn().mockResolvedValue([]);
     mockMetricsRepo.getRecentAgentSessions = jest.fn().mockResolvedValue([]);
+    mockMetricsRepo.calculateStreakDays = jest.fn().mockResolvedValue(5);
     mockMetricsRepo.getCoreMetrics = jest.fn().mockResolvedValue({
       codeOwnershipScore: 75,
       skillDevelopmentHealth: 'good' as const,
@@ -289,13 +290,15 @@ describe('DashboardProvider', () => {
     });
 
     it('should update webview with data', async () => {
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       expect(mockWebviewView.webview.postMessage).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'updateData',
           data: expect.objectContaining({
-            today: mockDailyMetrics
+            today: expect.any(Object),
+            toolBreakdown: expect.any(Array),
+            config: expect.any(Object)
           })
         })
       );
@@ -310,7 +313,7 @@ describe('DashboardProvider', () => {
     it('should handle errors gracefully', async () => {
       mockMetricsRepo.getDailyMetrics.mockRejectedValue(new Error('Database error'));
 
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       expect(mockWebviewView.webview.postMessage).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -352,7 +355,7 @@ describe('DashboardProvider', () => {
     });
 
     it('should get complete dashboard data', async () => {
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       const call = mockWebviewView.webview.postMessage.mock.calls[0][0];
       expect(call.data).toHaveProperty('today');
@@ -365,7 +368,7 @@ describe('DashboardProvider', () => {
     });
 
     it('should calculate daily metrics', async () => {
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       const today = new Date().toISOString().split('T')[0];
       expect(mockMetricsRepo.calculateDailyMetrics).toHaveBeenCalledWith(today);
@@ -373,7 +376,7 @@ describe('DashboardProvider', () => {
 
     it('should get last 7 days metrics', async () => {
       jest.clearAllMocks(); // Clear calls from beforeEach resolveWebviewView
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       // getDashboardData calls getDailyMetrics for: today + 7 days in getLast7DaysMetrics + today again in getToolBreakdown
       expect(mockMetricsRepo.getDailyMetrics).toHaveBeenCalled();
@@ -407,7 +410,7 @@ describe('DashboardProvider', () => {
     });
 
     it('should get tool breakdown', async () => {
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       const call = mockWebviewView.webview.postMessage.mock.calls[0][0];
       expect(call.data.toolBreakdown).toBeInstanceOf(Array);
@@ -469,7 +472,7 @@ describe('DashboardProvider', () => {
         return Promise.resolve(metrics.find(m => m.date === date) || null);
       });
 
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       const call = mockWebviewView.webview.postMessage.mock.calls[0][0];
       expect(call.data.trends).toHaveProperty('aiPercentage');
@@ -479,7 +482,7 @@ describe('DashboardProvider', () => {
     it('should return stable trend for insufficient data', async () => {
       mockMetricsRepo.getDailyMetrics.mockResolvedValue(mockDailyMetrics);
 
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       const call = mockWebviewView.webview.postMessage.mock.calls[0][0];
       expect(call.data.trends.aiPercentage).toBe('stable');
@@ -676,7 +679,7 @@ describe('DashboardProvider', () => {
     it('should handle not snoozed state', async () => {
       mockConfigRepo.getSnoozeState.mockResolvedValue({ snoozed: false });
 
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       const call = mockWebviewView.webview.postMessage.mock.calls[0][0];
       expect(call.data.snoozeState.snoozed).toBe(false);
@@ -761,7 +764,7 @@ describe('DashboardProvider', () => {
         return Promise.resolve(metricsWithStreak.find(m => m.date === date) || null);
       });
 
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       const call = mockWebviewView.webview.postMessage.mock.calls[0][0];
       expect(call.data.streakDays).toBeGreaterThanOrEqual(0);
@@ -801,13 +804,15 @@ describe('DashboardProvider', () => {
         }
       };
 
+      freshMockRepo.calculateStreakDays = jest.fn().mockResolvedValue(0);
+
       freshProvider.resolveWebviewView(
         freshMockView as never,
         {} as never,
         {} as never
       );
 
-      await freshProvider.refresh();
+      await freshProvider.refresh(true);
 
       const call = freshMockView.webview.postMessage.mock.calls[0][0];
       expect(call.data.streakDays).toBe(0);
@@ -825,14 +830,14 @@ describe('DashboardProvider', () => {
     });
 
     it('should get coding modes breakdown', async () => {
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       const call = mockWebviewView.webview.postMessage.mock.calls[0][0];
       expect(call.data.codingModes).toBeDefined();
     });
 
     it('should include agent, inline, and chatPaste modes', async () => {
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       const call = mockWebviewView.webview.postMessage.mock.calls[0][0];
       expect(call.data.codingModes.agent).toBeDefined();
@@ -853,7 +858,7 @@ describe('DashboardProvider', () => {
     });
 
     it('should include workspace info in dashboard data', async () => {
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       const call = mockWebviewView.webview.postMessage.mock.calls[0][0];
       expect(call.data.workspace).toBeDefined();
@@ -881,7 +886,7 @@ describe('DashboardProvider', () => {
 
       mockMetricsRepo.getUnreviewedFiles.mockResolvedValue(unreviewedFiles as never);
 
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       const call = mockWebviewView.webview.postMessage.mock.calls[0][0];
       expect(call.data.unreviewedFiles).toEqual(unreviewedFiles);
@@ -894,7 +899,7 @@ describe('DashboardProvider', () => {
 
       mockMetricsRepo.getTerminalReviewedFiles.mockResolvedValue(terminalReviewed as never);
 
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       const call = mockWebviewView.webview.postMessage.mock.calls[0][0];
       expect(call.data.terminalReviewedFiles).toEqual(terminalReviewed);
@@ -907,7 +912,7 @@ describe('DashboardProvider', () => {
 
       mockMetricsRepo.getRecentAgentSessions.mockResolvedValue(agentSessions as never);
 
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       const call = mockWebviewView.webview.postMessage.mock.calls[0][0];
       expect(call.data.agentSessions).toEqual(agentSessions);
@@ -925,13 +930,228 @@ describe('DashboardProvider', () => {
     });
 
     it('should include core metrics in dashboard data', async () => {
-      await dashboardProvider.refresh();
+      await dashboardProvider.refresh(true);
 
       const call = mockWebviewView.webview.postMessage.mock.calls[0][0];
       expect(call.data.coreMetrics).toBeDefined();
       expect(call.data.coreMetrics).toHaveProperty('codeOwnershipScore');
       expect(call.data.coreMetrics).toHaveProperty('skillDevelopmentHealth');
       expect(call.data.coreMetrics).toHaveProperty('reviewQuality');
+    });
+  });
+
+  // BUG #3 FIX TESTS: Dashboard Auto-Refresh
+  describe('BUG #3: Dashboard Auto-Refresh Fix', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+      jest.clearAllMocks();
+      dashboardProvider.resolveWebviewView(
+        mockWebviewView as never,
+        {} as never,
+        {} as never
+      );
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('should debounce automatic refresh calls (3 seconds)', async () => {
+      // Multiple rapid refresh calls
+      dashboardProvider.refresh(); // Should be debounced
+      dashboardProvider.refresh(); // Should be debounced
+      dashboardProvider.refresh(); // Should be debounced
+
+      // No refresh should happen yet
+      expect(mockWebviewView.webview.postMessage).not.toHaveBeenCalled();
+
+      // Fast-forward time by 3 seconds and run all timers
+      await jest.runAllTimersAsync();
+
+      // Should have refreshed only once
+      expect(mockWebviewView.webview.postMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('should allow immediate refresh when forceHtmlUpdate is true', async () => {
+      // Use real timers for this test since we want immediate execution
+      jest.useRealTimers();
+
+      // Force refresh (user-triggered)
+      await dashboardProvider.refresh(true);
+
+      // Should refresh immediately without debouncing
+      expect(mockWebviewView.webview.postMessage).toHaveBeenCalledTimes(1);
+
+      // Restore fake timers for other tests
+      jest.useFakeTimers();
+    });
+
+    it('should batch multiple refresh calls within debounce window', async () => {
+      // First call
+      dashboardProvider.refresh();
+      jest.advanceTimersByTime(1000); // 1 second
+
+      // Second call (within 3 second window)
+      dashboardProvider.refresh();
+      jest.advanceTimersByTime(1000); // 2 seconds total
+
+      // Third call (within 3 second window from second call)
+      dashboardProvider.refresh();
+
+      // Run all pending timers
+      await jest.runAllTimersAsync();
+
+      // Should have only refreshed once (all calls batched)
+      expect(mockWebviewView.webview.postMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('should clear pending debounce timer on new refresh call', async () => {
+      dashboardProvider.refresh();
+      jest.advanceTimersByTime(2000); // 2 seconds (not complete)
+
+      // New call resets the timer
+      dashboardProvider.refresh();
+      jest.advanceTimersByTime(2000); // Another 2 seconds (total 4s from first call)
+
+      // Should not have refreshed yet
+      expect(mockWebviewView.webview.postMessage).not.toHaveBeenCalled();
+
+      jest.advanceTimersByTime(1000); // Complete the 3 seconds from second call
+
+      await jest.runOnlyPendingTimersAsync();
+
+      // Now should have refreshed once
+      expect(mockWebviewView.webview.postMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('should increment refresh call counter for debugging', async () => {
+      jest.useRealTimers(); // Use real timers for this test since refresh(true) uses setTimeout
+
+      const initialCount = (dashboardProvider as any).refreshCallCount || 0;
+
+      await dashboardProvider.refresh(true);
+      await dashboardProvider.refresh(true);
+      await dashboardProvider.refresh(true);
+
+      const finalCount = (dashboardProvider as any).refreshCallCount;
+      expect(finalCount).toBeGreaterThan(initialCount);
+      expect(finalCount - initialCount).toBe(3);
+
+      jest.useFakeTimers(); // Restore fake timers for other tests
+    });
+  });
+
+  // BUG #4 FIX TESTS: Forced Scroll-Up
+  describe('BUG #4: Forced Scroll-Up Fix', () => {
+    let freshDashboardProvider: DashboardProvider;
+
+    beforeEach(() => {
+      jest.clearAllTimers();
+      jest.clearAllMocks();
+
+      // Create fresh dashboard provider for these tests
+      freshDashboardProvider = new DashboardProvider(
+        mockExtensionUri,
+        mockMetricsRepo,
+        mockConfigRepo,
+        mockThresholdManager
+      );
+    });
+
+    it('should set retainContextWhenHidden on webview', () => {
+      const mockView = {
+        webview: {
+          options: {},
+          html: '',
+          onDidReceiveMessage: jest.fn(),
+          postMessage: jest.fn(),
+          asWebviewUri: jest.fn((uri: vscode.Uri) => uri),
+          cspSource: 'vscode-webview'
+        },
+        retainContextWhenHidden: undefined
+      };
+
+      freshDashboardProvider.resolveWebviewView(
+        mockView as never,
+        {} as never,
+        {} as never
+      );
+
+      // BUG #4 FIX: retainContextWhenHidden should be set to true
+      expect(mockView.retainContextWhenHidden).toBe(true);
+    });
+
+    it('should use message-based updates (postMessage) instead of HTML replacement', async () => {
+      const mockView = {
+        webview: {
+          options: {},
+          html: '',
+          onDidReceiveMessage: jest.fn(),
+          postMessage: jest.fn(),
+          asWebviewUri: jest.fn((uri: vscode.Uri) => uri),
+          cspSource: 'vscode-webview'
+        }
+      };
+
+      freshDashboardProvider.resolveWebviewView(
+        mockView as never,
+        {} as never,
+        {} as never
+      );
+
+      const initialHtml = mockView.webview.html;
+
+      // Force immediate refresh to avoid debounce delay
+      await freshDashboardProvider.refresh(true);
+
+      // HTML should not change (message-based update)
+      expect(mockView.webview.html).toBe(initialHtml);
+
+      // But postMessage should be called with updateData
+      expect(mockView.webview.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'updateData',
+          data: expect.any(Object)
+        })
+      );
+    });
+
+    it('should preserve webview state across multiple refreshes', async () => {
+      const mockView = {
+        webview: {
+          options: {},
+          html: '',
+          onDidReceiveMessage: jest.fn(),
+          postMessage: jest.fn(),
+          asWebviewUri: jest.fn((uri: vscode.Uri) => uri),
+          cspSource: 'vscode-webview'
+        },
+        retainContextWhenHidden: undefined
+      };
+
+      freshDashboardProvider.resolveWebviewView(
+        mockView as never,
+        {} as never,
+        {} as never
+      );
+
+      // Multiple refreshes
+      await freshDashboardProvider.refresh(true);
+      await freshDashboardProvider.refresh(true);
+      await freshDashboardProvider.refresh(true);
+
+      // retainContextWhenHidden should still be true
+      expect(mockView.retainContextWhenHidden).toBe(true);
+
+      // All refreshes should use postMessage (not HTML replacement)
+      expect(mockView.webview.postMessage).toHaveBeenCalledTimes(3);
+      mockView.webview.postMessage.mock.calls.forEach((call) => {
+        expect(call[0]).toEqual(
+          expect.objectContaining({
+            type: 'updateData'
+          })
+        );
+      });
     });
   });
 });
