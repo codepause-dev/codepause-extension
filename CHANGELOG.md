@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Review Quality Score**: 0-100 scoring based on user interaction
 - **Balance Score**: Overall health indicator (Excellent/Good/Needs Attention)
 - **Skill-Level Aware Notifications**: Different guidance for Junior/Mid/Senior devs
-- **Unified AI Detection**: Works with Copilot, Cursor, Claude Code, and all AI tools
+- **Unified AI Detection**: Works with Copilot, Cursor, Claude Code, and most of AI tools
 - **Dashboard**: Clean, simple metrics overview
 - **15 Languages**: Support for JavaScript, TypeScript, Python, Java, C++, Rust, etc.
 - **Snooze Feature**: Pause notifications for 24 hours

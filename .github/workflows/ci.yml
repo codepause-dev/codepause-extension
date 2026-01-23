@@ -41,7 +41,7 @@ jobs:
 
     - name: Upload coverage
       if: matrix.os == 'ubuntu-latest'
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v4
       with:
         files: ./coverage/coverage-final.json
         flags: unittests
@@ -70,7 +70,7 @@ jobs:
         vsce package
 
     - name: Upload VSIX
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: extension-vsix
         path: '*.vsix'
