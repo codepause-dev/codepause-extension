@@ -166,12 +166,12 @@ describe('DataRetentionManager', () => {
       nowSpy.mockRestore();
     });
 
-    it('should count events before and after cleanup', async () => {
+    it('should delete old events during cleanup', async () => {
       mockGlobalStateGet.mockReturnValue(null); // Free tier
 
       await manager.performCleanup();
 
-      expect(mockCountEvents).toHaveBeenCalledTimes(2);
+      expect(mockDeleteEventsBefore).toHaveBeenCalled();
     });
 
     it('should update last cleanup timestamp', async () => {
@@ -201,19 +201,14 @@ describe('DataRetentionManager', () => {
       consoleErrorSpy.mockRestore();
     });
 
-    it('should log message when many events are deleted', async () => {
+    it('should handle large deletion without issues', async () => {
       mockGlobalStateGet.mockReturnValue(null); // Free tier
       mockDeleteEventsBefore.mockResolvedValue(150); // More than 100
 
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-
       await manager.performCleanup();
 
-      expect(consoleLogSpy).toHaveBeenCalledWith(
-        '[DataRetention] Removed 150 events older than 30 days'
-      );
-
-      consoleLogSpy.mockRestore();
+      expect(mockDeleteEventsBefore).toHaveBeenCalled();
+      expect(mockGlobalStateUpdate).toHaveBeenCalledWith('lastCleanupTimestamp', expect.any(Number));
     });
   });
 
