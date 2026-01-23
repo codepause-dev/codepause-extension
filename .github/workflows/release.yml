@@ -1,0 +1,114 @@
+name: Release and Publish
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    name: Create Release and Publish
+    runs-on: ubuntu-latest
+    # Skip release if commit message contains [skip release] or [skip ci]
+    if: "!contains(github.event.head_commit.message, '[skip release]') && !contains(github.event.head_commit.message, '[skip ci]')"
+    permissions:
+      contents: write  # Required for creating releases and pushing tags
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for proper versioning
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20.x
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Run tests
+      run: npm test
+
+    - name: Configure Git
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+    - name: Bump version
+      id: version
+      run: |
+        # Get current version from package.json
+        CURRENT_VERSION=$(node -p "require('./package.json').version")
+        echo "Current version: $CURRENT_VERSION"
+
+        # Bump patch version (e.g., 0.1.0 -> 0.1.1)
+        npm version patch --no-git-tag-version
+
+        # Get new version
+        NEW_VERSION=$(node -p "require('./package.json').version")
+        echo "New version: $NEW_VERSION"
+        echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "tag=v$NEW_VERSION" >> $GITHUB_OUTPUT
+
+    - name: Compile extension
+      run: npm run compile
+
+    - name: Package extension
+      run: |
+        npm install -g @vscode/vsce
+        vsce package
+
+    - name: Commit version bump
+      run: |
+        git add package.json package-lock.json
+        git commit -m "Bump version to ${{ steps.version.outputs.version }} [skip ci]" || echo "No changes to commit"
+        git tag ${{ steps.version.outputs.tag }}
+
+    - name: Push changes and tags
+      run: |
+        git push origin main
+        git push origin ${{ steps.version.outputs.tag }}
+
+    - name: Generate changelog
+      id: changelog
+      run: |
+        # Get commits since last tag
+        LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+        if [ -z "$LAST_TAG" ]; then
+          COMMITS=$(git log --pretty=format:"- %s (%h)" --no-merges)
+        else
+          COMMITS=$(git log $LAST_TAG..HEAD --pretty=format:"- %s (%h)" --no-merges)
+        fi
+
+        # Save to file for multiline handling
+        echo "$COMMITS" > changelog.txt
+        echo "changelog<<EOF" >> $GITHUB_OUTPUT
+        cat changelog.txt >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: Create GitHub Release
+      id: create_release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release create ${{ steps.version.outputs.tag }} \
+          --title "Release ${{ steps.version.outputs.version }}" \
+          --notes-file changelog.txt \
+          ./code-pause-${{ steps.version.outputs.version }}.vsix
+
+    - name: Publish to VS Code Marketplace
+      run: vsce publish -p ${{ secrets.VSCE_PAT }}
+      env:
+        VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+    - name: Publish to Open VSX Registry
+      continue-on-error: true  # Don't fail if Open VSX publishing fails
+      run: |
+        npm install -g ovsx
+        ovsx publish code-pause-${{ steps.version.outputs.version }}.vsix -p ${{ secrets.OVSX_PAT }}
+      env:
+        OVSX_PAT: ${{ secrets.OVSX_PAT }}
