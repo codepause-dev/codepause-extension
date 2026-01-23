@@ -10,10 +10,19 @@ import {
   ToolMetrics,
   CodingSession,
   AITool,
-  EventType
+  EventType,
+  CodeSource
 } from '../types';
 
 export class MetricsRepository {
+  // BUG #3 FIX: Add caching to prevent excessive database queries
+  private dailyMetricsCache: {
+    date: string;
+    data: DailyMetrics | null;
+    timestamp: number;
+  } | null = null;
+  private readonly CACHE_DURATION_MS = 3000; // 3 seconds cache
+
   constructor(private db: DatabaseManager) {}
 
   async recordEvent(event: TrackingEvent): Promise<number> {
@@ -21,12 +30,51 @@ export class MetricsRepository {
   }
 
   async getDailyMetrics(date: string): Promise<DailyMetrics | null> {
-    return await this.db.getDailyMetrics(date);
+    // BUG #3 FIX: Check cache first
+    if (this.dailyMetricsCache &&
+        this.dailyMetricsCache.date === date &&
+        Date.now() - this.dailyMetricsCache.timestamp < this.CACHE_DURATION_MS) {
+      return this.dailyMetricsCache.data;
+    }
+
+    // Cache miss - fetch from database
+    const data = await this.db.getDailyMetrics(date);
+
+    // Update cache
+    this.dailyMetricsCache = {
+      date,
+      data,
+      timestamp: Date.now()
+    };
+
+    return data;
   }
 
   async getTodayMetrics(): Promise<DailyMetrics | null> {
     const today = this.getTodayString();
     return await this.getDailyMetrics(today);
+  }
+
+  /**
+   * Get yesterday's metrics for continuity display
+   * Returns null if no data available (e.g., first day, weekend gap)
+   */
+  async getYesterdayMetrics(): Promise<DailyMetrics | null> {
+    try {
+      const yesterday = this.getDateStringDaysAgo(1);
+      const metrics = await this.getDailyMetrics(yesterday);
+
+      // Check if yesterday actually had activity
+      // (getDailyMetrics returns empty metrics if no events)
+      if (!metrics || (metrics.totalAILines === 0 && metrics.totalManualLines === 0)) {
+        return null; // No activity yesterday
+      }
+
+      return metrics;
+    } catch (error) {
+      console.error('[MetricsRepository] Failed to fetch yesterday metrics:', error);
+      return null; // Graceful degradation
+    }
   }
 
   async getLastNDaysMetrics(days: number): Promise<DailyMetrics[]> {
@@ -35,14 +83,62 @@ export class MetricsRepository {
     return await this.db.getDailyMetricsRange(startDate, endDate);
   }
 
-  async calculateDailyMetrics(date: string): Promise<DailyMetrics> {
-    const startOfDay = new Date(date).setHours(0, 0, 0, 0);
-    const endOfDay = new Date(date).setHours(23, 59, 59, 999);
+  /**
+   * Calculate current streak of balanced AI usage
+   * A "balanced day" is defined as:
+   * - Junior: < 60% AI
+   * - Mid: < 50% AI
+   * - Senior: < 40% AI
+   *
+   * Streak counts consecutive days of balanced usage
+   */
+  async calculateStreakDays(experienceLevel: 'junior' | 'mid' | 'senior'): Promise<number> {
+    try {
+      const threshold = experienceLevel === 'junior' ? 60 :
+                        experienceLevel === 'mid' ? 50 : 40;
 
-    const events = await this.db.getEvents(
-      new Date(startOfDay).toISOString().split('T')[0],
-      new Date(endOfDay).toISOString().split('T')[0]
-    );
+      let streak = 0;
+      const checkDate = new Date();
+
+      // Go backwards from today, counting consecutive balanced days
+      for (let i = 0; i < 90; i++) { // Check up to 90 days back
+        const dateString = checkDate.toISOString().split('T')[0];
+        const metrics = await this.getDailyMetrics(dateString);
+
+        // Check if this day had activity and was balanced
+        const hadActivity = metrics && (metrics.totalAILines > 0 || metrics.totalManualLines > 0);
+        const wasBalanced = metrics && metrics.aiPercentage < threshold;
+
+        if (hadActivity && wasBalanced) {
+          streak++;
+        } else if (hadActivity && !wasBalanced) {
+          // Streak broken - unbalanced day
+          break;
+        }
+        // No activity = skip (weekends/days off don't break streak)
+
+        // Move to previous day
+        checkDate.setDate(checkDate.getDate() - 1);
+      }
+
+      return streak;
+    } catch (error) {
+      console.error('[MetricsRepository] Failed to calculate streak:', error);
+      return 0;
+    }
+  }
+
+  async calculateDailyMetrics(date: string): Promise<DailyMetrics> {
+    // FIX: Use proper timestamp range to avoid timezone issues
+    // Parse date as UTC to ensure consistent behavior across timezones
+    const dateObj = new Date(date + 'T00:00:00.000Z');
+    const startOfDay = dateObj.getTime();
+    const endOfDay = startOfDay + (24 * 60 * 60 * 1000) - 1; // 86399999ms = 23:59:59.999
+
+
+    // Use getEventsByDateRange which takes timestamps directly
+    const events = await this.db.getEventsByDateRange(startOfDay, endOfDay);
+
 
     // Calculate metrics from events
     const metrics = await this.calculateMetricsFromEvents(date, events);
@@ -50,11 +146,50 @@ export class MetricsRepository {
     // Store calculated metrics
     await this.db.insertOrUpdateDailyMetrics(metrics);
 
+    // Invalidate cache after calculating new metrics
+    this.invalidateCache();
+
     return metrics;
   }
 
+  // BUG #3 FIX: Invalidate cache when data changes
+  public invalidateCache(): void {
+    this.dailyMetricsCache = null;
+  }
+
   private async calculateMetricsFromEvents(date: string, events: TrackingEvent[]): Promise<DailyMetrics> {
-    let totalAILines = 0;
+
+    // CRITICAL FIX: Filter events to ONLY include the exact date
+    // This prevents timezone issues from including events from adjacent days
+    const targetDate = date; // YYYY-MM-DD format
+    const dateFilteredEvents = events.filter(event => {
+      const eventDate = new Date(event.timestamp).toISOString().split('T')[0];
+      const matches = eventDate === targetDate;
+      return matches;
+    });
+
+    // BUG #1 FIX: Use file-level totals instead of event-based totals
+    // Events can be duplicated (inline-completion-api + external-file-change for same edit)
+    // File-level data in file_review_status table is the source of truth
+
+    // AUTHORSHIP FIX: Query ALL files for authorship calculation (both reviewed and unreviewed)
+    // Authorship balance should reflect all code written today, not just unreviewed code
+    const allFilesForAuthorship = await this.db.getAllFilesForDate(date);
+
+    // Calculate total AI lines from ALL files with changes today (reviewed or not)
+    // Filter: has changes AND timestamp is within this date
+    const dayStart = new Date(date + 'T00:00:00.000Z').getTime();
+    const dayEnd = dayStart + 86399999;
+
+    const totalAILines = allFilesForAuthorship.reduce((sum: number, file) => {
+      const hasChanges = (file.linesAdded || 0) > 0 || (file.linesRemoved || 0) > 0;
+      const timestamp = file.firstGeneratedAt || 0;
+      const isFromThisDate = timestamp >= dayStart && timestamp <= dayEnd;
+      // Count TOTAL AI activity: additions + deletions (both are AI changes)
+      return sum + (hasChanges && isFromThisDate ? ((file.linesAdded || 0) + (file.linesRemoved || 0)) : 0);
+    }, 0);
+
+
     let totalManualLines = 0; // Changed from const to let - we need to track manual lines!
     let totalReviewTime = 0;
     let reviewTimeCount = 0;
@@ -74,7 +209,7 @@ export class MetricsRepository {
     const now = Date.now();
     const oneHourAgo = now - (60 * 60 * 1000);
 
-    const realTimeEvents = events.filter(event => {
+    const realTimeEvents = dateFilteredEvents.filter(event => {
       const metadata = event.metadata as any;
 
       // Always exclude old scanner events (historical scanning)
@@ -106,16 +241,13 @@ export class MetricsRepository {
       return true;
     });
 
-
     for (const event of realTimeEvents) {
       // PHASE 2 FIX: Handle unified 'ai' tool from UnifiedAITracker
       // Map 'ai' to 'claude-code' for tool breakdown (generic AI category)
       const toolName = (event.tool === 'ai' as any) ? AITool.ClaudeCode : event.tool;
       const toolMetrics = toolBreakdown[toolName];
 
-      // Safety check: if tool is still not recognized, skip this event
       if (!toolMetrics) {
-        console.warn(`[MetricsRepository] Unknown tool: ${event.tool}, skipping event`);
         continue;
       }
 
@@ -152,15 +284,26 @@ export class MetricsRepository {
             }
           }
 
-          if (event.linesOfCode) {
+          // Count lines: use linesChanged (includes both additions and deletions) or fallback to linesOfCode + linesRemoved
+          const totalLinesChanged = event.linesChanged ?? ((event.linesOfCode ?? 0) + (event.linesRemoved ?? 0));
+
+          if (totalLinesChanged > 0) {
             // Check if this is manual code or AI-generated
-            if (metadata?.manual) {
+            // CRITICAL: Check BOTH event.source AND metadata.manual
+            // - event.source: Unified source (CodeSource.AI vs CodeSource.Manual)
+            // - metadata.manual: Manual detection override
+            const isManualCode = event.source === CodeSource.Manual || metadata?.manual === true;
+
+            if (isManualCode) {
               // Manual code - count separately
-              totalManualLines += event.linesOfCode;
+              totalManualLines += totalLinesChanged;
             } else {
-              // AI-generated code
-              totalAILines += event.linesOfCode;
-              toolMetrics.linesGenerated += event.linesOfCode;
+              // BUG #1 FIX: Don't sum totalAILines from events (causes duplicate counting)
+              // AI lines are now calculated from file-level data above
+              // totalAILines += totalLinesChanged;  // REMOVED - causes overcounting
+
+              // Still track tool-level metrics for breakdown
+              toolMetrics.linesGenerated += totalLinesChanged;
             }
           }
 
@@ -173,7 +316,25 @@ export class MetricsRepository {
                                   !!metadata?.newFile || // Truthy check
                                   !!metadata?.fileCreation; // Truthy check
 
-          if (event.acceptanceTimeDelta !== undefined && event.acceptanceTimeDelta !== null && !isFileCreation) {
+          // AVG QUICK REVIEW FIX: Exclude agent mode from quick review calculation
+          // Quick review should only measure inline autocomplete and copy/paste, not agent-generated files
+          // Agent mode indicators:
+          // 1. isAgentMode flag explicitly set
+          // 2. external-file-change detection (file modified while closed)
+          // 3. File was closed during modification (fileWasOpen === false)
+          // 4. Closed file modifications or file creation events
+          // 5. isAgentGenerated flag (Claude/agent generated the code)
+          const isAgentMode = event.isAgentMode === true ||
+                             event.detectionMethod === 'external-file-change' ||
+                             metadata?.isAgentMode === true ||
+                             event.fileWasOpen === false ||
+                             metadata?.closedFileModification === true ||
+                             metadata?.fileCreation === true ||
+                             (event as any).isAgentGenerated === true ||
+                             metadata?.isAgentGenerated === true;
+
+          if (event.acceptanceTimeDelta !== undefined && event.acceptanceTimeDelta !== null &&
+              !isFileCreation && !isAgentMode) {
             // Validate acceptanceTimeDelta - should be reasonable (0 to 5 minutes max)
             const MAX_REASONABLE_REVIEW_TIME = 5 * 60 * 1000; // 5 minutes in milliseconds
             const MIN_REASONABLE_REVIEW_TIME = 0;
@@ -187,9 +348,6 @@ export class MetricsRepository {
 
               // Note: Blind approval detection logic removed
               // Detection still happens in BlindApprovalDetector for AlertEngine
-            } else if (event.acceptanceTimeDelta !== undefined && event.acceptanceTimeDelta !== null) {
-              // Log invalid values for debugging (but not undefined values)
-              console.log(`[MetricsRepository] Invalid acceptanceTimeDelta: ${event.acceptanceTimeDelta}ms`);
             }
           }
           break;
@@ -199,44 +357,79 @@ export class MetricsRepository {
           toolMetrics.rejectedCount++;
           break;
 
-        case EventType.CodeGenerated:
-          if (event.linesOfCode) {
+        case EventType.CodeGenerated: {
+          // Count lines: use linesChanged (includes both additions and deletions) or fallback
+          const codeGenLinesChanged = event.linesChanged ?? ((event.linesOfCode ?? 0) + (event.linesRemoved ?? 0));
+
+          if (codeGenLinesChanged > 0) {
             // Check if this is manual code or AI-generated
-            if (metadata?.manual) {
+            // CRITICAL: Check BOTH event.source AND metadata.manual
+            // - event.source: Unified source (CodeSource.AI vs CodeSource.Manual)
+            // - metadata.manual: Manual detection override
+            const isManualCode = event.source === CodeSource.Manual || metadata?.manual === true;
+
+            if (isManualCode) {
               // Manual code written by user
-              totalManualLines += event.linesOfCode;
+              totalManualLines += codeGenLinesChanged;
             } else {
-              // AI-generated code
-              totalAILines += event.linesOfCode;
-              toolMetrics.linesGenerated += event.linesOfCode;
+              // BUG #1 FIX: Don't sum totalAILines from events (causes duplicate counting)
+              // AI lines are now calculated from file-level data above
+              // totalAILines += codeGenLinesChanged;  // REMOVED - causes overcounting
+
+              // Still track tool-level metrics for breakdown
+              toolMetrics.linesGenerated += codeGenLinesChanged;
+
+              // CRITICAL FIX: CodeGenerated events should also count as AI suggestions
+              // Agent mode generates entire files/blocks - these ARE AI suggestions
+              if (!suggestionId || !seenSuggestionIds.has(suggestionId)) {
+                // Count as a suggestion if we haven't seen this file/session
+                toolMetrics.suggestionCount++;
+                if (suggestionId) {
+                  seenSuggestionIds.add(suggestionId);
+                }
+              }
             }
           }
           break;
+        }
       }
     }
 
-    // Add file review times to average calculation
-    // Get all reviewed files for this day and include their review times
-    const reviewedFilesForAvg = await this.getFileReviewsForDate(date);
-    const reviewedFilesWithTime = reviewedFilesForAvg.filter(f => f.isReviewed && f.totalReviewTime > 0);
-
-    for (const file of reviewedFilesWithTime) {
-      totalReviewTime += file.totalReviewTime;
-      reviewTimeCount++;
-    }
-
-    // Calculate average review time - includes both inline completions AND file reviews
-    // If reviewTimeCount is 0 or totalReviewTime is invalid, default to 0
+    // Separate inline completion review time from file review time
     let averageReviewTime = 0;
     if (reviewTimeCount > 0 && totalReviewTime >= 0) {
       averageReviewTime = totalReviewTime / reviewTimeCount;
-      
-      // Sanity check: if average is unreasonably high (> 1 hour), something is wrong
-      const MAX_REASONABLE_AVG = 60 * 60 * 1000; // 1 hour in milliseconds
-      if (averageReviewTime > MAX_REASONABLE_AVG) {
-        console.error(`[MetricsRepository] WARNING: Invalid average review time: ${averageReviewTime}ms (${(averageReviewTime/1000).toFixed(1)}s). Review time count: ${reviewTimeCount}, Total: ${totalReviewTime}ms`);
-        // Reset to 0 to prevent display of invalid data
+
+      // Sanity check: if average is unreasonably high (> 5 minutes), reset
+      const MAX_REASONABLE_INLINE_AVG = 5 * 60 * 1000;
+      if (averageReviewTime > MAX_REASONABLE_INLINE_AVG) {
         averageReviewTime = 0;
+      }
+    }
+
+    // Calculate file review time separately
+    // CRITICAL FIX: Include files with review time regardless of current isReviewed status
+    // A file may have been reviewed previously and now needs re-review after new AI code
+    // The time already spent reviewing should still count toward the average
+    const reviewedFilesForAvg = await this.getFileReviewsForDate(date);
+    const reviewedFilesWithTime = reviewedFilesForAvg.filter(f => f.totalReviewTime > 0);
+
+    let totalFileReviewTime = 0;
+    let fileReviewCount = 0;
+    let averageFileReviewTime = 0;
+
+    for (const file of reviewedFilesWithTime) {
+      totalFileReviewTime += file.totalReviewTime;
+      fileReviewCount++;
+    }
+
+    if (fileReviewCount > 0) {
+      averageFileReviewTime = totalFileReviewTime / fileReviewCount;
+
+      // Sanity check: if average is unreasonably high (> 1 hour), reset
+      const MAX_REASONABLE_FILE_AVG = 60 * 60 * 1000;
+      if (averageFileReviewTime > MAX_REASONABLE_FILE_AVG) {
+        averageFileReviewTime = 0;
       }
     }
     
@@ -295,20 +488,36 @@ export class MetricsRepository {
     for (const file of measurableFiles) {
       totalGeneratedLines += file.linesGenerated || 0;
 
-      // Count ALL files with review scores (even if poorly reviewed)
-      totalReviewScore += file.reviewScore || 0;
+      // CRITICAL FIX: Use linesSinceReview for unreviewed lines calculation
+      // This correctly tracks NEW unreviewed lines after modifications
+      // linesSinceReview = lines added since last review (0 if fully reviewed)
+      const fileUnreviewedLines = file.linesSinceReview || 0;
+      unreviewedLines += fileUnreviewedLines;
 
-      // Only track "unreviewed lines" for files that truly have NO review (score = 0)
-      if (!file.reviewScore || file.reviewScore === 0) {
-        unreviewedLines += file.linesGenerated || 0;
+      // Calculate effective review score based on reviewed portion
+      // If file has new unreviewed lines, adjust the score proportionally
+      const fileGeneratedLines = file.linesGenerated || 0;
+      if (fileGeneratedLines > 0) {
+        // BUG FIX: Clamp reviewedLines to prevent negative values
+        // This can happen if linesSinceReview > linesGenerated due to tracking bugs
+        const reviewedLines = Math.max(0, fileGeneratedLines - fileUnreviewedLines);
+        // Clamp reviewedPortion to [0, 1] range for safety
+        const reviewedPortion = Math.min(1, Math.max(0, reviewedLines / fileGeneratedLines));
+        // Effective score = original score * reviewed portion
+        // e.g., If 100% score but only 60% reviewed, effective = 60%
+        const effectiveScore = (file.reviewScore || 0) * reviewedPortion;
+        totalReviewScore += effectiveScore;
+      } else {
+        totalReviewScore += file.reviewScore || 0;
       }
     }
 
     // If no measurable files, return undefined (N/A)
     // Don't calculate score from terminal files that haven't been opened yet
+    // BUG FIX: Clamp final score to [0, 100] range to prevent negative ownership scores
     const reviewQualityScore = measurableFiles.length === 0
       ? undefined  // No measurable files = N/A
-      : Math.round(totalReviewScore / measurableFiles.length);  // Average of measurable files only
+      : Math.max(0, Math.min(100, Math.round(totalReviewScore / measurableFiles.length)));
 
     const unreviewedPercentage = fileReviews.length === 0
       ? undefined  // No AI files = N/A
@@ -331,12 +540,15 @@ export class MetricsRepository {
       totalAILines,
       totalManualLines,
       aiPercentage,
-      averageReviewTime,
+      averageReviewTime, // Inline completion review time only
       sessionCount: 0, // Will be calculated separately
       toolBreakdown,
       reviewQualityScore,
       unreviewedLines: fileReviews.length === 0 ? undefined : unreviewedLines,
-      unreviewedPercentage
+      unreviewedPercentage,
+      // NEW: Separate file review time metric
+      averageFileReviewTime: fileReviewCount > 0 ? averageFileReviewTime : undefined,
+      reviewedFilesCount: fileReviewCount > 0 ? fileReviewCount : undefined
     };
   }
 
@@ -431,6 +643,11 @@ export class MetricsRepository {
     return await this.db.getFileReviewsForDate(date);
   }
 
+  async getFileReviewStatus(filePath: string, tool: string, date: string): Promise<any | null> {
+    const allReviews = await this.db.getFileReviewsForDate(date);
+    return allReviews.find((r: any) => r.filePath === filePath && r.tool === tool) || null;
+  }
+
   async saveFileReviewStatus(status: any): Promise<void> {
     return await this.db.insertOrUpdateFileReviewStatus(status);
   }
@@ -445,9 +662,10 @@ export class MetricsRepository {
 
   /**
    * Manually mark a file as reviewed
+   * @param reviewMethod - 'manual' (user clicked button) or 'automatic' (system detected proper review)
    */
-  async markFileAsReviewed(filePath: string, tool: string, date: string, developerLevel?: string): Promise<void> {
-    return await this.db.markFileAsReviewed(filePath, tool, date, developerLevel);
+  async markFileAsReviewed(filePath: string, tool: string, date: string, developerLevel?: string, reviewMethod: 'manual' | 'automatic' = 'manual'): Promise<void> {
+    return await this.db.markFileAsReviewed(filePath, tool, date, developerLevel, reviewMethod);
   }
 
   /**
@@ -475,7 +693,7 @@ export class MetricsRepository {
     // Core Metric 2: Code Ownership Score
     const fileReviews = await this.getFileReviewsForDate(this.getTodayString());
     const unreviewedFiles = fileReviews.filter((f: any) => !f.isReviewed && f.reviewScore < 70);
-    const totalUnreviewedLines = unreviewedFiles.reduce((sum: number, f: any) => sum + (f.linesOfCode || 0), 0);
+    const totalUnreviewedLines = unreviewedFiles.reduce((sum: number, f: any) => sum + (f.linesSinceReview || 0), 0);
 
     const ownership = {
       score: today.reviewQualityScore || 0,
@@ -515,24 +733,66 @@ export class MetricsRepository {
       };
     }
 
+    // Only include days with actual AI activity for review score average
+    const daysWithAIActivity = last7Days.filter((d: any) => d.totalAILines > 0);
+    const reviewScores = daysWithAIActivity
+      .map((d: any) => d.reviewQualityScore)
+      .filter((score: any) => score !== undefined && score !== null);
+
     // Calculate component scores
     const avgAIPercent = this.average(last7Days.map((d: any) => d.aiPercentage));
     const aiBalanceScore = this.calculateAIBalanceScore(avgAIPercent, threshold.maxAIPercentage);
 
-    const avgReviewScore = this.average(last7Days.map((d: any) => d.reviewQualityScore || 0));
+    // Only average days that had AI activity with review scores
+    const avgReviewScore = reviewScores.length > 0
+      ? this.average(reviewScores)
+      : 50; // Neutral score if no AI activity to review
 
     const daysWithActivity = last7Days.filter((d: any) => d.totalEvents > 0).length;
     const consistencyScore = (daysWithActivity / 7) * 100;
 
-    // Combined score (weighted)
+    // Combined score (weighted: 40% AI balance + 40% review + 20% consistency)
     const score = (aiBalanceScore * 0.4) + (avgReviewScore * 0.4) + (consistencyScore * 0.2);
 
-    // Determine status
+    // Determine status - detect extreme swings and unhealthy patterns
     let status = 'good';
-    if (score >= 75 && avgAIPercent < 50 && avgReviewScore >= 70) {
+    const issues: string[] = [];
+
+    // Check for extreme AI days (>80% AI on any single day)
+    const extremeAIDays = last7Days.filter((d: any) => d.aiPercentage > 80 && d.totalAILines > 0);
+
+    // Check for high variance (extreme swings between days)
+    const aiPercentages = last7Days.filter((d: any) => d.totalEvents > 0).map((d: any) => d.aiPercentage);
+    const variance = aiPercentages.length > 1 ? this.calculateVariance(aiPercentages) : 0;
+    const hasHighVariance = variance > 1000;
+
+    // Determine status with comprehensive checks
+    if (score >= 75 && avgAIPercent < 50 && avgReviewScore >= 70 && extremeAIDays.length === 0) {
       status = 'excellent';
-    } else if (avgAIPercent > 70 || avgReviewScore < 40 || daysWithActivity < 3) {
+    } else if (
+      avgAIPercent > 70 ||
+      extremeAIDays.length > 0 ||
+      hasHighVariance ||
+      (reviewScores.length > 0 && avgReviewScore < 40) ||
+      daysWithActivity < 3
+    ) {
       status = 'needs-attention';
+
+      if (avgAIPercent > 70) {
+        issues.push(`High average AI usage (${avgAIPercent.toFixed(1)}% - target <50%)`);
+      }
+      if (extremeAIDays.length > 0) {
+        issues.push(`${extremeAIDays.length} day${extremeAIDays.length > 1 ? 's' : ''} with >80% AI (AI dependency risk)`);
+      }
+      if (hasHighVariance) {
+        issues.push('Inconsistent AI usage pattern (extreme swings between days)');
+      }
+      if (reviewScores.length > 0 && avgReviewScore < 40) {
+        issues.push(`Low review quality (${avgReviewScore.toFixed(1)}/100 - improve code review)`);
+      }
+      if (daysWithActivity < 3) {
+        issues.push(`Low activity (${daysWithActivity}/7 days - code more regularly)`);
+      }
     }
 
     // Calculate trend
@@ -540,11 +800,11 @@ export class MetricsRepository {
     const secondHalf = last7Days.slice(4, 7);
     const firstHalfScore = this.average(firstHalf.map((d: any) =>
       (this.calculateAIBalanceScore(d.aiPercentage, threshold.maxAIPercentage) * 0.5) +
-      ((d.reviewQualityScore || 0) * 0.5)
+      ((d.reviewQualityScore !== undefined ? d.reviewQualityScore : 50) * 0.5)
     ));
     const secondHalfScore = this.average(secondHalf.map((d: any) =>
       (this.calculateAIBalanceScore(d.aiPercentage, threshold.maxAIPercentage) * 0.5) +
-      ((d.reviewQualityScore || 0) * 0.5)
+      ((d.reviewQualityScore !== undefined ? d.reviewQualityScore : 50) * 0.5)
     ));
 
     let trend = 'stable';
@@ -554,6 +814,24 @@ export class MetricsRepository {
       trend = 'declining';
     }
 
+    // Generate actionable recommendations based on issues
+    const recommendations: string[] = [];
+    if (avgAIPercent > 70) {
+      recommendations.push('Write more manual code to practice fundamentals and maintain skills');
+    }
+    if (extremeAIDays.length > 0) {
+      recommendations.push('Aim for 30-50% AI assistance - avoid over-reliance on AI tools');
+    }
+    if (hasHighVariance) {
+      recommendations.push('Maintain consistent AI usage patterns for better skill development');
+    }
+    if (reviewScores.length > 0 && avgReviewScore < 40) {
+      recommendations.push('Spend more time reviewing AI code before accepting changes');
+    }
+    if (daysWithActivity < 3) {
+      recommendations.push('Code at least 3-4 days per week to maintain consistency');
+    }
+
     return {
       status,
       score: Math.round(score),
@@ -561,7 +839,12 @@ export class MetricsRepository {
       reviewQualityScore: Math.round(avgReviewScore),
       consistencyScore: Math.round(consistencyScore),
       trend,
-      daysWithActivity
+      daysWithActivity,
+      // NEW: Detailed issues and recommendations
+      issues: issues.length > 0 ? issues : undefined,
+      recommendations: recommendations.length > 0 ? recommendations : undefined,
+      extremeAIDays: extremeAIDays.length,
+      variance: Math.round(variance)
     };
   }
 
@@ -648,6 +931,19 @@ export class MetricsRepository {
       return 0;
     }
     return numbers.reduce((sum, n) => sum + n, 0) / numbers.length;
+  }
+
+  /**
+   * Calculate variance of an array of numbers
+   * Used to detect inconsistent/extreme swings in AI usage
+   */
+  private calculateVariance(numbers: number[]): number {
+    if (numbers.length === 0) {
+      return 0;
+    }
+    const avg = this.average(numbers);
+    const squaredDiffs = numbers.map(n => Math.pow(n - avg, 2));
+    return this.average(squaredDiffs);
   }
 
   private getTodayString(): string {

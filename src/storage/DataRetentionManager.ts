@@ -41,8 +41,6 @@ export class DataRetentionManager {
         this.performCleanup();
       }, 24 * 60 * 60 * 1000); // 24 hours
     }, msUntilMidnight);
-
-    console.log(`[DataRetention] Cleanup scheduled. Next run at ${midnight.toISOString()}`);
   }
 
   /**
@@ -52,7 +50,6 @@ export class DataRetentionManager {
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = undefined;
-      console.log('[DataRetention] Cleanup scheduler stopped');
     }
   }
 
@@ -60,15 +57,12 @@ export class DataRetentionManager {
    * Perform data cleanup based on user tier
    */
   async performCleanup(): Promise<void> {
-    console.log('[DataRetention] Starting cleanup...');
-
     const tier = this.getUserTier();
 
     if (tier === 'free') {
       await this.cleanupFreeUserData();
-    } else {
-      console.log('[DataRetention] Pro/Team user - keeping all data');
     }
+    // Pro/Team users keep all data
   }
 
   /**
@@ -78,28 +72,11 @@ export class DataRetentionManager {
     try {
       const thirtyDaysAgo = Date.now() - (DataRetentionManager.FREE_TIER_RETENTION_DAYS * 24 * 60 * 60 * 1000);
 
-      // Count records before cleanup (for logging)
-      const countBefore = await this.dbManager.countEvents();
-
       // Delete events older than 30 days
-      const deletedCount = await this.dbManager.deleteEventsBefore(thirtyDaysAgo);
-
-      const countAfter = await this.dbManager.countEvents();
-
-      console.log(`[DataRetention] FREE tier cleanup complete:`);
-      console.log(`  - Records before: ${countBefore}`);
-      console.log(`  - Deleted: ${deletedCount}`);
-      console.log(`  - Records after: ${countAfter}`);
-      console.log(`  - Cutoff date: ${new Date(thirtyDaysAgo).toISOString()}`);
+      await this.dbManager.deleteEventsBefore(thirtyDaysAgo);
 
       // Update last cleanup timestamp
       this.context.globalState.update('lastCleanupTimestamp', Date.now());
-
-      // Show notification if significant data was deleted (optional)
-      if (deletedCount > 100) {
-        console.log(`[DataRetention] Removed ${deletedCount} events older than 30 days`);
-      }
-
     } catch (error) {
       console.error('[DataRetention] Cleanup failed:', error);
     }
@@ -162,7 +139,6 @@ export class DataRetentionManager {
    * Manual cleanup trigger (for testing and user commands)
    */
   async triggerManualCleanup(): Promise<void> {
-    console.log('[DataRetention] Manual cleanup triggered');
     await this.performCleanup();
 
     const range = await this.getDataRange();

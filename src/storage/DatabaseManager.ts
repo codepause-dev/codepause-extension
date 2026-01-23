@@ -133,13 +133,6 @@ export class DatabaseManager implements IDatabaseManager {
   }
 
   async initialize(): Promise<void> {
-    console.log('========================================');
-    console.log('[DatabaseManager] 🔍 INITIALIZING DATABASE');
-    console.log('[DatabaseManager] 📂 Database path:', this.dbPath);
-    console.log('[DatabaseManager] 🏷️  Workspace hash:', this.workspaceHash);
-    console.log('[DatabaseManager] 🗂️  Workspace path:', this.workspacePath);
-    console.log('========================================');
-
     const dirname = path.dirname(this.dbPath);
     if (!fs.existsSync(dirname)) {
       fs.mkdirSync(dirname, { recursive: true });
@@ -169,29 +162,8 @@ export class DatabaseManager implements IDatabaseManager {
 
     this.createTables();
     this.createIndices();
-    this.runMigrations(); // Run database migrations
+    this.runMigrations();
     this.startAutoSave();
-
-    // Log what's in the database
-    try {
-      const eventsResult = this.db.exec('SELECT COUNT(*) as count FROM events');
-      const metricsResult = this.db.exec('SELECT COUNT(*) as count FROM daily_metrics');
-      const eventsCount = eventsResult[0]?.values[0]?.[0] || 0;
-      const metricsCount = metricsResult[0]?.values[0]?.[0] || 0;
-
-      console.log('[DatabaseManager] 📊 Events in DB:', eventsCount);
-      console.log('[DatabaseManager] 📊 Daily metrics in DB:', metricsCount);
-
-      if (eventsCount > 0) {
-        const recentEvents = this.db.exec('SELECT source, COUNT(*) as count, SUM(lines_of_code) as lines FROM events GROUP BY source');
-        console.log('[DatabaseManager] 📊 Events by source:', recentEvents[0]?.values);
-      }
-    } catch (error) {
-      console.log('[DatabaseManager] ⚠️  Could not query database counts:', error);
-    }
-
-    console.log('[DatabaseManager] ✅ Database initialized successfully');
-    console.log('========================================');
   }
 
   /**
@@ -207,7 +179,33 @@ export class DatabaseManager implements IDatabaseManager {
     this.safeAddColumn('events', 'detection_method', 'TEXT'); // How the event was detected
     this.safeAddColumn('events', 'confidence', 'TEXT'); // Detection confidence level ('high', 'medium', 'low')
 
-    console.log('[DatabaseManager] ✓ Phase 2 migrations applied: Added source, detection_method, confidence columns');
+    // Migration: Add lines_changed column for accurate review scoring
+    // Tracks total lines changed (added + deleted) for review time calculation
+    // Unlike lines_of_code which only tracks additions for metrics
+    this.safeAddColumn('events', 'lines_changed', 'INTEGER'); // Total changes for review scoring
+
+    // Migration: Add lines_changed to file_review_status for review scoring
+    // This tracks total changes (added + |deleted|) for calculating expected review time
+    this.safeAddColumn('file_review_status', 'lines_changed', 'INTEGER DEFAULT 0');
+
+    // Migration: Add review_method column to track manual vs automatic reviews
+    // 'manual' = user clicked "Mark as Reviewed" button
+    // 'automatic' = system detected proper review via file viewing, scrolling, editing
+    this.safeAddColumn('file_review_status', 'review_method', 'TEXT DEFAULT "manual"');
+
+    // Add lines_since_review column to track only new lines since last review
+    // lines_generated = total AI lines since file creation (cumulative, never resets)
+    // lines_since_review = AI lines added since last review (resets to 0 when marked as reviewed)
+    this.safeAddColumn('file_review_status', 'lines_since_review', 'INTEGER DEFAULT 0');
+
+    // Migration: Add lines_removed column to track line deletions
+    // This allows proper tracking of AI deletions for code review
+    this.safeAddColumn('events', 'lines_removed', 'INTEGER DEFAULT 0');
+
+    // Migration: Add lines_added and lines_removed to file_review_status
+    // Tracks separate addition and removal counts for better transparency
+    this.safeAddColumn('file_review_status', 'lines_added', 'INTEGER DEFAULT 0');
+    this.safeAddColumn('file_review_status', 'lines_removed', 'INTEGER DEFAULT 0');
   }
 
   private startAutoSave(): void {
@@ -269,8 +267,12 @@ export class DatabaseManager implements IDatabaseManager {
    */
   private validateSqlType(type: string): void {
     const allowedTypes = ['TEXT', 'INTEGER', 'REAL', 'BLOB', 'NUMERIC', 'BOOLEAN', 'DATE', 'DATETIME'];
-    const normalizedType = type.toUpperCase().split('(')[0].trim(); // Handle types like VARCHAR(255)
-    if (!allowedTypes.includes(normalizedType) && !type.match(/^(TEXT|INTEGER|VARCHAR)\(\d+\)$/i)) {
+
+    // Extract base type by removing constraints (DEFAULT, NOT NULL, etc.)
+    // Split on space and take first token, then split on ( for types like VARCHAR(255)
+    const baseType = type.trim().split(/\s+/)[0].toUpperCase().split('(')[0];
+
+    if (!allowedTypes.includes(baseType) && !type.match(/^(TEXT|INTEGER|VARCHAR)\(\d+\)/i)) {
       throw new Error(`Invalid SQL type: ${type}`);
     }
   }
@@ -303,8 +305,7 @@ export class DatabaseManager implements IDatabaseManager {
         this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
       }
     } catch (error) {
-      // Column might already exist or other error - log and continue
-      console.log(`[DatabaseManager] Column ${table}.${column} migration: ${error instanceof Error ? error.message : 'skipped'}`);
+      // Column might already exist - ignore
     }
   }
 
@@ -489,6 +490,10 @@ export class DatabaseManager implements IDatabaseManager {
     this.safeAddColumn('daily_metrics', 'unreviewed_percentage', 'REAL');
     this.safeAddColumn('daily_metrics', 'agent_session_count', 'INTEGER DEFAULT 0');
     this.safeAddColumn('daily_metrics', 'total_ai_suggestions', 'INTEGER DEFAULT 0');
+
+    // Migration: Add file review time columns to daily_metrics
+    this.safeAddColumn('daily_metrics', 'average_file_review_time', 'REAL');
+    this.safeAddColumn('daily_metrics', 'reviewed_files_count', 'INTEGER');
   }
 
   private createIndices(): void {
@@ -515,11 +520,11 @@ export class DatabaseManager implements IDatabaseManager {
 
     const stmt = this.db.prepare(`
       INSERT INTO events (
-        timestamp, tool, event_type, lines_of_code, characters_count,
+        timestamp, tool, event_type, lines_of_code, lines_removed, characters_count,
         acceptance_time_delta, file_path, language, session_id, metadata,
         review_quality, review_quality_score, is_reviewed, is_agent_mode, agent_session_id,
-        source, detection_method, confidence
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source, detection_method, confidence, lines_changed
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.bind([
@@ -527,6 +532,7 @@ export class DatabaseManager implements IDatabaseManager {
       event.tool,
       event.eventType,
       event.linesOfCode ?? null,
+      event.linesRemoved ?? null, // NEW: Lines removed
       event.charactersCount ?? null,
       event.acceptanceTimeDelta ?? null,
       event.filePath ?? null,
@@ -540,7 +546,8 @@ export class DatabaseManager implements IDatabaseManager {
       event.agentSessionId ?? null,
       event.source ?? null, // NEW: Unified source tracking (ai/manual)
       event.detectionMethod ?? null, // NEW: Detection method metadata
-      event.confidence ?? null // NEW: Detection confidence level
+      event.confidence ?? null, // NEW: Detection confidence level
+      event.linesChanged ?? null // NEW: Total changes for review scoring
     ]);
 
     stmt.step();
@@ -672,8 +679,9 @@ export class DatabaseManager implements IDatabaseManager {
         date, total_events, total_ai_suggestions, total_ai_lines, total_manual_lines,
         ai_percentage, average_review_time,
         session_count,
-        review_quality_score, unreviewed_lines, unreviewed_percentage
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        review_quality_score, unreviewed_lines, unreviewed_percentage,
+        average_file_review_time, reviewed_files_count
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run([
@@ -688,7 +696,9 @@ export class DatabaseManager implements IDatabaseManager {
       // Use null for undefined values (not 0!)
       metrics.reviewQualityScore !== undefined ? metrics.reviewQualityScore : null,
       metrics.unreviewedLines !== undefined ? metrics.unreviewedLines : null,
-      metrics.unreviewedPercentage !== undefined ? metrics.unreviewedPercentage : null
+      metrics.unreviewedPercentage !== undefined ? metrics.unreviewedPercentage : null,
+      metrics.averageFileReviewTime !== undefined ? metrics.averageFileReviewTime : null,
+      metrics.reviewedFilesCount !== undefined ? metrics.reviewedFilesCount : null
     ]);
 
    
@@ -990,6 +1000,8 @@ export class DatabaseManager implements IDatabaseManager {
       tool: record.tool as AITool,
       eventType: record.event_type as EventType,
       linesOfCode: record.lines_of_code ?? undefined,
+      linesRemoved: record.lines_removed ?? undefined,
+      linesChanged: record.lines_changed ?? undefined,
       charactersCount: record.characters_count ?? undefined,
       acceptanceTimeDelta: record.acceptance_time_delta ?? undefined,
       filePath: record.file_path ?? undefined,
@@ -1026,7 +1038,9 @@ export class DatabaseManager implements IDatabaseManager {
       reviewQualityScore: record.review_quality_score ?? undefined,
       unreviewedLines: record.unreviewed_lines ?? undefined,
       unreviewedPercentage: record.unreviewed_percentage ?? undefined,
-      agentSessionCount: record.agent_session_count ?? undefined
+      agentSessionCount: record.agent_session_count ?? undefined,
+      averageFileReviewTime: record.average_file_review_time ?? undefined,
+      reviewedFilesCount: record.reviewed_files_count ?? undefined
     };
   }
 
@@ -1296,31 +1310,142 @@ export class DatabaseManager implements IDatabaseManager {
   async insertOrUpdateFileReviewStatus(status: FileReviewStatus): Promise<void> {
     if (!this.db) {throw new Error('Database not initialized');}
 
+    // Preserve manually marked as reviewed status
+    // If the file is already marked as reviewed in the database, keep it that way
+    // This prevents periodic aggregation from overwriting manual reviews
+    //
+    // IMPORTANT: sql.js returns arrays, not objects. Column indices:
+    // 0: id, 1: file_path, 2: date, 3: tool, 4: review_quality, 5: review_score, 6: is_reviewed
+    const rawRecord = this.db.prepare(`
+      SELECT * FROM file_review_status
+      WHERE file_path = ? AND date = ? AND tool = ?
+    `).get([status.filePath, status.date, status.tool]);
+
+    // sql.js returns an array, not an object with named properties
+    const existingRecord = rawRecord as number[] | undefined;
+    const existingIsReviewed = existingRecord?.[6]; // Index 6 = is_reviewed column
+    const existingReviewScore = existingRecord?.[5]; // Index 5 = review_score column
+    const existingReviewQuality = existingRecord?.[4]; // Index 4 = review_quality column
+    // Index 9 = agent_session_id column (may be string or null in DB)
+    const existingAgentSessionId = existingRecord?.[9] as string | null | undefined;
+
+    // Check if this is the SAME agent session or a NEW one
+    // If it's a new agent session, the file was modified again and needs re-review
+    //
+    // CRITICAL FIX: Only consider it a "new modification" if it's a different session
+    // If it's the same agent session continuing work, preserve reviewed status
+    const hasDifferentSession = existingAgentSessionId !== null &&
+                                existingAgentSessionId !== undefined &&
+                                status.agentSessionId !== undefined &&
+                                status.agentSessionId !== existingAgentSessionId;
+
+    const isNewModification = hasDifferentSession;
+
+    // CRITICAL FIX: Separate preservation of is_reviewed vs review_score/quality
+    //
+    // For is_reviewed:
+    // - If new modification: Set to false (file needs re-review)
+    // - If same modification: Preserve existing reviewed status
+    const wasManuallyReviewed = existingRecord && existingIsReviewed === 1;
+    const shouldPreserveReviewedStatus = wasManuallyReviewed && !isNewModification;
+    const finalIsReviewed = shouldPreserveReviewedStatus ? true : status.isReviewed;
+
+    // Get existing review data
+    // Index 14 = total_review_time in the original table schema
+    const existingTotalReviewTime = existingRecord?.[14] || 0;
+
+    // For review_score and review_quality:
+    // - ALWAYS preserve if they exist (partial review data is valuable!)
+    // - Even if new modification, the ALREADY REVIEWED portion still has value
+    // - Only use status values if no existing values (or explicitly provided)
+    const shouldPreserveReviewData = existingRecord && ((existingReviewScore ?? 0) > 0 || existingTotalReviewTime > 0);
+    const finalReviewScore = shouldPreserveReviewData && existingReviewScore ? existingReviewScore : status.reviewScore;
+    const finalReviewQuality = shouldPreserveReviewData && existingReviewQuality ? existingReviewQuality : status.reviewQuality;
+
+    // Handle lines_since_review tracking
+    // - MetricsCollector.ts already accumulates linesSinceReview before sending to database
+    // - Database should just store the value as-is, NOT accumulate again (would cause double accumulation)
+    // - If status.linesSinceReview is undefined (from periodic aggregation), preserve existing value
+    // - If file is being marked as reviewed, reset lines_since_review to 0
+    //
+    // IMPORTANT: Column indices after migrations (in order of addition):
+    // 0-22: original columns, 23: created_at, 24: updated_at, 25: reviewed_in_terminal,
+    // 26: lines_changed, 27: review_method, 28: lines_since_review, 29: lines_added, 30: lines_removed
+    const existingLinesSinceReview = existingRecord?.[28] || 0; // Index 28 = lines_since_review column
+    const existingLinesAdded = existingRecord?.[29] || 0; // Index 29 = lines_added column
+    const existingLinesRemoved = existingRecord?.[30] || 0; // Index 30 = lines_removed column
+    let finalLinesSinceReview: number;
+
+    // Check if linesSinceReview was explicitly provided (not undefined)
+    // undefined = from periodic aggregation, preserve existing value
+    // number = from actual event, use as-is (already accumulated by MetricsCollector)
+    const isLinesSinceReviewProvided = status.linesSinceReview !== undefined;
+
+    if (!finalIsReviewed) {
+      // File is NOT reviewed
+      if (isLinesSinceReviewProvided) {
+        // From actual event - use value as-is (MetricsCollector already accumulated)
+        // Event 1: receives 123, stores 123
+        // Event 2: receives 216 (already 123+93), stores 216 (NOT 123+216)
+        finalLinesSinceReview = status.linesSinceReview ?? 0;
+      } else {
+        // From periodic aggregation - preserve existing value
+        finalLinesSinceReview = existingLinesSinceReview;
+      }
+    } else {
+      // File is reviewed - reset to 0
+      finalLinesSinceReview = 0;
+    }
+
+    // CRITICAL FIX: Preserve linesAdded and linesRemoved from existing record
+    // if not explicitly provided in the status object.
+    // This prevents periodic aggregation from resetting these values to 0.
+    const isLinesAddedProvided = status.linesAdded !== undefined;
+    const isLinesRemovedProvided = status.linesRemoved !== undefined;
+    const finalLinesAdded = isLinesAddedProvided ? (status.linesAdded ?? 0) : existingLinesAdded;
+    const finalLinesRemoved = isLinesRemovedProvided ? (status.linesRemoved ?? 0) : existingLinesRemoved;
+
+    // CRITICAL FIX: Preserve total_review_time - ALWAYS preserve if exists
+    // Preserves time already spent reviewing, even if file needs re-review after new modifications
+    const finalTotalReviewTime = shouldPreserveReviewData && existingTotalReviewTime > 0
+      ? existingTotalReviewTime
+      : status.totalReviewTime;
+
+    // Always update updated_at timestamp to NOW
+    // Preserve created_at from existing record (or use firstGeneratedAt for new records)
+    const now = Date.now();
+    const createdAt = existingRecord?.[23] || status.firstGeneratedAt; // Index 23 = created_at
+
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO file_review_status (
         file_path, date, tool, review_quality, review_score, is_reviewed,
-        lines_generated, characters_count, agent_session_id, is_agent_generated,
+        lines_generated, lines_changed, lines_since_review, lines_added, lines_removed, characters_count, agent_session_id, is_agent_generated,
         was_file_open, first_generated_at, last_reviewed_at, total_review_time,
         language, modification_count, total_time_in_focus, scroll_event_count,
-        cursor_movement_count, edits_made, last_opened_at, review_sessions_count, reviewed_in_terminal
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        cursor_movement_count, edits_made, last_opened_at, review_sessions_count, reviewed_in_terminal,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.bind([
       status.filePath,
       status.date,
       status.tool,
-      status.reviewQuality,
-      status.reviewScore,
-      status.isReviewed ? 1 : 0,
+      finalReviewQuality,
+      finalReviewScore,
+      finalIsReviewed ? 1 : 0,
       status.linesGenerated,
+      status.linesChanged ?? 0,
+      finalLinesSinceReview,
+      finalLinesAdded,
+      finalLinesRemoved,
       status.charactersCount,
       status.agentSessionId ?? null,
       status.isAgentGenerated ? 1 : 0,
       status.wasFileOpen ? 1 : 0,
       status.firstGeneratedAt,
       status.lastReviewedAt ?? null,
-      status.totalReviewTime,
+      finalTotalReviewTime,
       status.language ?? null,
       status.modificationCount,
       status.totalTimeInFocus,
@@ -1329,7 +1454,9 @@ export class DatabaseManager implements IDatabaseManager {
       status.editsMade ? 1 : 0,
       status.lastOpenedAt ?? null,
       status.reviewSessionsCount,
-      status.reviewedInTerminal ? 1 : 0
+      status.reviewedInTerminal ? 1 : 0,
+      createdAt,
+      now
     ]);
 
     stmt.step();
@@ -1343,6 +1470,27 @@ export class DatabaseManager implements IDatabaseManager {
     const stmt = this.db.prepare(`
       SELECT * FROM file_review_status
       WHERE date = ? AND is_reviewed = 0
+      ORDER BY first_generated_at DESC
+    `);
+    stmt.bind([date]);
+
+    const files: FileReviewStatus[] = [];
+    while (stmt.step()) {
+      const record = stmt.getAsObject() as unknown as FileReviewStatusRecord;
+      files.push(this.mapFileReviewStatusRecordToStatus(record));
+    }
+
+    stmt.free();
+    return files;
+  }
+
+  async getAllFilesForDate(date: string): Promise<FileReviewStatus[]> {
+    if (!this.db) {throw new Error('Database not initialized');}
+
+    // AUTHORSHIP FIX: Get ALL files for a date (reviewed or not) for authorship calculation
+    const stmt = this.db.prepare(`
+      SELECT * FROM file_review_status
+      WHERE date(first_generated_at / 1000, 'unixepoch') = ?
       ORDER BY first_generated_at DESC
     `);
     stmt.bind([date]);
@@ -1400,6 +1548,7 @@ export class DatabaseManager implements IDatabaseManager {
   }
 
   private mapFileReviewStatusRecordToStatus(record: FileReviewStatusRecord): FileReviewStatus {
+
     return {
       filePath: record.file_path,
       date: record.date,
@@ -1408,6 +1557,10 @@ export class DatabaseManager implements IDatabaseManager {
       reviewScore: record.review_score,
       isReviewed: record.is_reviewed === 1,
       linesGenerated: record.lines_generated,
+      linesChanged: record.lines_changed,
+      linesSinceReview: record.lines_since_review,
+      linesAdded: record.lines_added, // CRITICAL FIX: Map lines_added from database
+      linesRemoved: record.lines_removed, // CRITICAL FIX: Map lines_removed from database
       charactersCount: record.characters_count,
       agentSessionId: record.agent_session_id ?? undefined,
       isAgentGenerated: record.is_agent_generated === 1,
@@ -1427,37 +1580,44 @@ export class DatabaseManager implements IDatabaseManager {
     };
   }
 
-  async markFileAsReviewed(filePath: string, tool: string, date: string, developerLevel: string = 'mid'): Promise<void> {
+  async markFileAsReviewed(filePath: string, tool: string, date: string, developerLevel: string = 'mid', reviewMethod: 'manual' | 'automatic' = 'manual'): Promise<void> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
 
     const now = Date.now();
 
-    // Get the file's lines_generated to calculate expected review time
+    // Get the file's lines_changed to calculate expected review time
+    // sql.js returns arrays. Index 7 = lines_generated, Index 26 = lines_changed
     const fileQuery = this.db.prepare(`
-      SELECT lines_generated FROM file_review_status
+      SELECT * FROM file_review_status
       WHERE file_path = ? AND tool = ? AND date = ?
     `);
-    const fileData = fileQuery.get([filePath, tool, date]) as { lines_generated: number } | undefined;
+    const fileData = fileQuery.get([filePath, tool, date]) as number[] | undefined;
 
-    // Calculate expected review time based on file size and developer level
+    // Calculate expected review time based on lines changed and developer level
+    // Lines changed = additions + |deletions| - this reflects actual review effort
     // Junior: 600ms per line, Mid: 400ms per line, Senior: 200ms per line
     const msPerLine = developerLevel === 'senior' ? 200 : developerLevel === 'junior' ? 600 : 400;
-    const linesGenerated = fileData?.lines_generated || 50;
-    const expectedReviewTime = Math.max(5000, linesGenerated * msPerLine); // Min 5 seconds
+
+    // Use lines_changed if available, otherwise fall back to lines_generated
+    const linesForReview = fileData?.[26] || fileData?.[7] || 50;
+    const expectedReviewTime = Math.max(5000, linesForReview * msPerLine); // Min 5 seconds
+
 
     const stmt = this.db.prepare(`
       UPDATE file_review_status
       SET is_reviewed = 1,
           review_score = 100,
           review_quality = 'thorough',
+          review_method = ?,
+          lines_since_review = 0,
           last_reviewed_at = ?,
           total_review_time = ?,
           updated_at = ?
       WHERE file_path = ? AND tool = ? AND date = ?
     `);
 
-    stmt.run([now, expectedReviewTime, now, filePath, tool, date]);
+    stmt.run([reviewMethod, now, expectedReviewTime, now, filePath, tool, date]);
   }
 }

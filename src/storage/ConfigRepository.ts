@@ -40,11 +40,10 @@ export class ConfigRepository {
 
     const userConfig = config as UserConfig;
 
-    // MIGRATION: If workspace has completed onboarding but globalState doesn't, migrate it
+    // Migrate workspace onboarding to globalState if needed
     if (this.globalState && userConfig.onboardingCompleted) {
       const globalOnboarding = this.globalState.get<boolean>(ConfigRepository.GLOBAL_ONBOARDING_KEY, false);
       if (!globalOnboarding) {
-        console.log('[ConfigRepository] Migrating onboarding status from workspace to globalState');
         await this.globalState.update(ConfigRepository.GLOBAL_ONBOARDING_KEY, true);
       }
     }
@@ -77,9 +76,9 @@ export class ConfigRepository {
       enableGamification: false, // Disabled by default
       anonymizePaths: true,
       trackedTools: {
-        copilot: true,  // Enabled by default - track all AI tools
-        cursor: true,   // Enabled by default - track all AI tools
-        claudeCode: true // Enabled by default - track all AI tools
+        copilot: true,  // Enabled by default - track most of AI tools
+        cursor: true,   // Enabled by default - track most of AI tools
+        claudeCode: true // Enabled by default - track most of AI tools
       },
       onboardingCompleted: false
     };
@@ -102,9 +101,6 @@ export class ConfigRepository {
     // Save to global state for user-level persistence
     if (this.globalState) {
       await this.globalState.update(ConfigRepository.GLOBAL_ONBOARDING_KEY, true);
-      console.log('[ConfigRepository] Onboarding completed - saved to globalState');
-    } else {
-      console.log('[ConfigRepository] Warning: globalState not available, saving only to workspace');
     }
     // Also update workspace config for backwards compatibility
     await this.updateConfig({ onboardingCompleted: true });
@@ -113,12 +109,9 @@ export class ConfigRepository {
   async isOnboardingCompleted(): Promise<boolean> {
     // Check global state first (user-level)
     if (this.globalState) {
-      const globalValue = this.globalState.get<boolean>(ConfigRepository.GLOBAL_ONBOARDING_KEY, false);
-      console.log(`[ConfigRepository] Checking onboarding status - globalState: ${globalValue}`);
-      return globalValue;
+      return this.globalState.get<boolean>(ConfigRepository.GLOBAL_ONBOARDING_KEY, false);
     }
     // Fallback to workspace config
-    console.log('[ConfigRepository] No globalState available, checking workspace config');
     const config = await this.getUserConfig();
     return config.onboardingCompleted;
   }
