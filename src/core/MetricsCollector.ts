@@ -12,6 +12,7 @@ import { AgentSessionDetector } from './AgentSessionDetector';
 import { FileReviewTracker } from './FileReviewTracker';
 import { FileReviewSessionTracker } from './FileReviewSessionTracker';
 import { EventDeduplicator } from '../tracking/EventDeduplicator';
+import { TelemetryService } from '../telemetry/TelemetryService';
 import {
   TrackingEvent,
   PendingSuggestion,
@@ -47,11 +48,14 @@ export class MetricsCollector implements IMetricsCollector {
   private agentSessionDetector: AgentSessionDetector;
   private fileReviewTracker: FileReviewTracker;
   private fileReviewSessionTracker: FileReviewSessionTracker;
+  private telemetryService?: TelemetryService;
 
   constructor(
     private metricsRepo: MetricsRepository,
-    private configManager: ConfigManager
+    private configManager: ConfigManager,
+    telemetryService?: TelemetryService
   ) {
+    this.telemetryService = telemetryService;
     // Initialize new components
     const config = this.configManager.getConfig();
     const thresholds = DEFAULT_THRESHOLDS[config.experienceLevel];
@@ -85,40 +89,70 @@ export class MetricsCollector implements IMetricsCollector {
       // FIXED: Set callback for immediate database updates when file is reviewed
       this.fileReviewSessionTracker.setReviewCallback(async (session) => {
         const today = new Date().toISOString().split('T')[0];
-        const fileStatus = {
-          filePath: session.filePath,
-          date: today,
-          tool: session.tool,
-          reviewQuality: session.currentReviewQuality,
-          reviewScore: session.currentReviewScore,
-          isReviewed: session.wasReviewed,
-          linesGenerated: session.linesGenerated || 0,
-          charactersCount: 0, // Not tracked in session
-          agentSessionId: session.agentSessionId,
-          isAgentGenerated: session.agentSessionId !== 'manual-session',
-          wasFileOpen: true, // File must be open to be reviewed
-          firstGeneratedAt: session.generatedAt,
-          lastReviewedAt: Date.now(),
-          totalReviewTime: session.totalTimeInFocus,
-          language: 'unknown', // Not tracked in session
-          modificationCount: 1,
-          totalTimeInFocus: session.totalTimeInFocus,
-          scrollEventCount: session.scrollEventCount,
-          cursorMovementCount: session.cursorMovementCount,
-          editsMade: session.editsMade,
-          lastOpenedAt: session.lastOpenedAt,
-          reviewSessionsCount: 1,
-          reviewedInTerminal: false // In-editor review, not terminal
-        };
+        const config = this.configManager.getConfig();
 
-        await this.metricsRepo.saveFileReviewStatus(fileStatus).catch(err => {
-          console.error('Failed to save reviewed file status:', err);
+        // Call markFileAsReviewed with 'automatic' review method
+        await this.metricsRepo.markFileAsReviewed(
+          session.filePath,
+          session.tool,
+          today,
+          config.experienceLevel,
+          'automatic' // System detected proper review via file viewing, scrolling, editing
+        );
+
+        // ========== CRITICAL FIX: Update in-memory cache ==========
+        // This ensures subsequent AI events see isReviewed = true
+        // Without this, the cache has stale data causing incorrect linesSinceReview accumulation
+        const existingStatus = this.fileReviewTracker.getFileStatus(session.filePath, today, session.tool);
+        if (existingStatus) {
+          this.fileReviewTracker.updateFileStatus(session.filePath, today, session.tool, {
+            isReviewed: true,
+            reviewScore: 100,
+            reviewQuality: ReviewQuality.Thorough,
+            linesSinceReview: 0,
+            lastReviewedAt: Date.now()
+          });
+        } else {
+          // Create new cache entry if none exists
+          this.fileReviewTracker.trackFile({
+            filePath: session.filePath,
+            date: today,
+            tool: session.tool,
+            reviewQuality: ReviewQuality.Thorough,
+            reviewScore: 100,
+            isReviewed: true,
+            linesGenerated: session.linesGenerated || 0,
+            linesChanged: session.linesGenerated || 0,
+            linesSinceReview: 0,
+            charactersCount: 0,
+            agentSessionId: session.agentSessionId,
+            isAgentGenerated: true,
+            wasFileOpen: true,
+            firstGeneratedAt: session.generatedAt,
+            lastReviewedAt: Date.now(),
+            totalReviewTime: session.totalTimeInFocus,
+            modificationCount: 0,
+            totalTimeInFocus: session.totalTimeInFocus,
+            scrollEventCount: session.scrollEventCount,
+            cursorMovementCount: session.cursorMovementCount,
+            editsMade: session.editsMade,
+            reviewSessionsCount: 1,
+            reviewedInTerminal: false
+          });
+        }
+
+        // Track telemetry event for automatic review
+        this.telemetryService?.track('file.reviewed', {
+          method: 'automatic',
+          triggeredBy: 'system',
+          reviewScore: session.currentReviewScore,
+          reviewQuality: session.currentReviewQuality,
+          timeInFocus: session.totalTimeInFocus
         });
 
-        console.log(`[MetricsCollector] 💾 Saved reviewed file status immediately: ${session.filePath}`);
       });
 
-      // CRITICAL FIX: Restore tracking for unreviewed files on extension startup
+      // Restore tracking for unreviewed files on extension startup
       // Without this, files generated before extension reload won't be tracked for auto-review
       await this.restoreUnreviewedFileTracking();
 
@@ -129,7 +163,6 @@ export class MetricsCollector implements IMetricsCollector {
       this.startNewSession();
 
       this.isInitialized = true;
-      console.log('[CodePause] MetricsCollector initialized');
     } catch (error) {
       console.error('[CodePause] Failed to initialize MetricsCollector:', error);
       throw error;
@@ -137,89 +170,94 @@ export class MetricsCollector implements IMetricsCollector {
   }
 
   private async initializeTrackers(): Promise<void> {
-    console.log('[CodePause] ✓ Initializing Phase 2 Unified Tracking System...');
-
-    // Phase 2: Initialize UnifiedAITracker (replaces Copilot/Cursor/Claude trackers)
-    console.log('[CodePause] ✓ Initializing Unified AI Tracker...');
+    // Initialize UnifiedAITracker (monitors all AI code generation)
     this.unifiedAITracker = new UnifiedAITracker((event: unknown) => this.handleEvent(event as TrackingEvent));
     await this.unifiedAITracker.initialize();
 
-    if (this.unifiedAITracker.isActive()) {
-      console.log('[CodePause] Unified AI Tracker ACTIVE - monitoring all AI code generation');
-      console.log('[CodePause]    → Detects: Copilot, Cursor, Claude Code, and other AI tools');
-      console.log('[CodePause]    → Methods: 5 detection methods with 99.99% accuracy');
-    } else {
-      console.log('[CodePause] WARNING: Unified AI Tracker not active');
-    }
-
     // Initialize Manual Code tracker (always enabled)
-    console.log('[CodePause] ✓ Initializing Manual Code tracker...');
     this.manualTracker = new ManualCodeTracker((event: unknown) => this.handleEvent(event as TrackingEvent));
     await this.manualTracker.initialize();
-
-    if (this.manualTracker.isActive()) {
-      console.log('[CodePause] Manual Code tracker ACTIVE - tracking user-typed code');
-      console.log('[CodePause]    → Uses ManualDetector with 100% accuracy (zero false positives)');
-    }
-
-    console.log('[CodePause] Phase 2 Unified Tracking System READY');
-    console.log('[CodePause]    → AI vs Manual detection with 99.99% accuracy');
-    console.log('[CodePause]    → Event deduplication enabled');
   }
 
   /**
-   * Restore tracking sessions for unreviewed files on extension startup
-   * This ensures files generated before extension reload are still tracked for auto-review
+   * Restore file tracking state from database on extension startup
+   * CRITICAL: Must restore BOTH FileReviewTracker AND FileReviewSessionTracker
+   *
+   * FileReviewTracker: In-memory cache for isReviewed status and linesSinceReview
+   * FileReviewSessionTracker: Active session tracking for auto-review detection
    */
   private async restoreUnreviewedFileTracking(): Promise<void> {
     try {
       const today = new Date().toISOString().split('T')[0];
-      const unreviewedFiles = await this.metricsRepo.getUnreviewedFiles(today);
 
-      if (unreviewedFiles.length === 0) {
-        console.log('[MetricsCollector] 📂 No unreviewed files to restore tracking for');
-        return;
-      }
+      // Restore ALL files to FileReviewTracker cache
+      const allFilesForToday = await this.metricsRepo.getFileReviewsForDate(today);
 
-      console.log(`[MetricsCollector] 📂 Restoring tracking for ${unreviewedFiles.length} unreviewed files...`);
-
-      for (const file of unreviewedFiles) {
-        // Skip if already tracking (shouldn't happen, but safety check)
-        if (this.fileReviewSessionTracker.isTracking(file.filePath)) {
-          continue;
+      if (allFilesForToday.length > 0) {
+        for (const file of allFilesForToday) {
+          // Restore to FileReviewTracker (in-memory cache)
+          this.fileReviewTracker.trackFile({
+            filePath: file.filePath,
+            date: file.date || today,
+            tool: file.tool,
+            reviewQuality: file.reviewQuality,
+            reviewScore: file.reviewScore,
+            isReviewed: file.isReviewed,  // ← Critical: restore reviewed status
+            linesGenerated: file.linesGenerated || 0,
+            linesChanged: file.linesChanged || 0,
+            linesSinceReview: file.linesSinceReview || 0,  // ← Critical: restore lines since review
+            charactersCount: file.charactersCount || 0,
+            agentSessionId: file.agentSessionId,
+            isAgentGenerated: file.isAgentGenerated ?? true,
+            wasFileOpen: file.wasFileOpen ?? false,
+            firstGeneratedAt: file.firstGeneratedAt,
+            lastReviewedAt: file.lastReviewedAt,
+            totalReviewTime: file.totalReviewTime || 0,
+            language: file.language,
+            modificationCount: file.modificationCount || 0,
+            totalTimeInFocus: file.totalTimeInFocus || 0,
+            scrollEventCount: file.scrollEventCount || 0,
+            cursorMovementCount: file.cursorMovementCount || 0,
+            editsMade: file.editsMade || false,
+            lastOpenedAt: file.lastOpenedAt,
+            reviewSessionsCount: file.reviewSessionsCount || 0,
+            reviewedInTerminal: file.reviewedInTerminal || false
+          });
         }
-
-        // Start tracking session
-        this.fileReviewSessionTracker.startTracking(
-          file.filePath,
-          file.tool,
-          file.agentSessionId || 'restored-session',
-          file.linesGenerated || 0
-        );
-
-        console.log(`[MetricsCollector] ✓ Restored tracking: ${file.filePath} (${file.linesGenerated} lines)`);
       }
 
-      console.log(`[MetricsCollector] ✅ Restored tracking for ${unreviewedFiles.length} files`);
+      // Also restore FileReviewSessionTracker for files that NEED REVIEW
+      // This includes:
+      // 1. Files that were never reviewed (!isReviewed)
+      // 2. Files that have new AI code since last review (linesSinceReview > 0)
+      // The second case handles when a file was reviewed but then got new AI code
+      const filesNeedingReview = allFilesForToday.filter(f =>
+        !f.isReviewed || (f.linesSinceReview && f.linesSinceReview > 0)
+      );
 
-      // CRITICAL FIX: Initialize timer if currently viewing a tracked file
-      // This handles the case where file is already open when extension loads
+      if (filesNeedingReview.length > 0) {
+        for (const file of filesNeedingReview) {
+          if (!this.fileReviewSessionTracker.isTracking(file.filePath)) {
+            this.fileReviewSessionTracker.startTracking(
+              file.filePath,
+              file.tool,
+              file.agentSessionId || 'restored-session',
+              file.linesGenerated || 0
+            );
+          }
+        }
+      }
+
+      // Initialize timer if currently viewing a tracked file
       this.fileReviewSessionTracker.initializeActiveFileTimer();
     } catch (error) {
-      console.error('[MetricsCollector] Failed to restore unreviewed file tracking:', error);
-      // Don't throw - this is not critical for extension initialization
+      console.error('[CodePause] Failed to restore file tracking:', error);
     }
   }
 
   private handleEvent(event: TrackingEvent): void {
-    // ========== STEP 0: Event Deduplication ==========
-    // Phase 2: Simplified deduplication using EventDeduplicator
-    // Prevents double-counting with 99.99% accuracy (validated with 13,200+ test events)
-
+    // Event deduplication - prevents double-counting
     if (this.eventDeduplicator.isDuplicate(event)) {
-      // Duplicate detected - log and ignore
-      const source = event.source || 'unknown';
-      console.log(`[MetricsCollector] 🚫 DUPLICATE BLOCKED: ${source} code at ${event.filePath} (${event.linesOfCode} lines)`);
       return;
     }
 
@@ -230,13 +268,15 @@ export class MetricsCollector implements IMetricsCollector {
     // ========== NEW: Review Quality Tracking Integration ==========
 
     // Step 1: Detect agent mode session
-    // IMPORTANT: Skip agent detection for inline completions
+    // IMPORTANT: Skip agent detection for inline completions and manual paste
     // Inline completions (Copilot/Cursor Tab acceptances) are user-reviewed suggestions,
     // NOT autonomous agent mode. Only bulk code gen and closed file mods trigger agent mode.
+    // Large paste is manual user action (copy/paste from ChatGPT, Claude web, etc.)
     const isInlineCompletion = event.detectionMethod === 'inline-completion-api';
+    const isManualPaste = event.detectionMethod === 'large-paste';
 
     let agentDetection;
-    if (!isInlineCompletion) {
+    if (!isInlineCompletion && !isManualPaste) {
       agentDetection = this.agentSessionDetector.processEvent(event);
 
       if (agentDetection.sessionDetected) {
@@ -262,21 +302,32 @@ export class MetricsCollector implements IMetricsCollector {
     }
 
     // Step 3: Track file review status
-    // CRITICAL: Only track file review status for AI-generated code, NOT manual code!
-    // Manual code doesn't need review tracking - it's written by the user
-    // (metadata and isManualCode already declared above for deduplication)
-
+    // Only track file review status for AI-generated code, NOT manual code
     if (event.filePath &&
         (event.eventType === EventType.SuggestionAccepted || event.eventType === EventType.CodeGenerated) &&
         !isManualCode) {
-      // Track file-level review status and persist to database
       const today = new Date().toISOString().split('T')[0];
       const existingStatus = this.fileReviewTracker.getFileStatus(event.filePath, today, event.tool);
 
       // Check if this file was created via terminal workflow
       const isFileCreationFromTerminal = metadata?.source === 'file-creation-accepted' ||
-                                          !!metadata?.closedFileModification || // Truthy check (handles 1 or true)
-                                          !!metadata?.newFile; // Truthy check
+                                          !!metadata?.closedFileModification ||
+                                          !!metadata?.newFile;
+
+      // Calculate linesSinceReview: if file was reviewed, reset to 0 then add new lines
+      const wasReviewed = existingStatus?.isReviewed === true;
+      const existingLinesSinceReview = wasReviewed ? 0 : (existingStatus?.linesSinceReview ?? 0);
+
+      // Use linesChanged which includes both additions and removals
+      // Falls back to sum of linesOfCode and linesRemoved if linesChanged not available
+      const changeAmount = event.linesChanged ?? ((event.linesOfCode ?? 0) + (event.linesRemoved ?? 0));
+      const calculatedLinesSinceReview = existingLinesSinceReview + changeAmount;
+
+      // Track separate additions and removals
+      const existingLinesAdded = wasReviewed ? 0 : (existingStatus?.linesAdded ?? 0);
+      const existingLinesRemoved = wasReviewed ? 0 : (existingStatus?.linesRemoved ?? 0);
+      const newLinesAdded = existingLinesAdded + (event.linesOfCode ?? 0);
+      const newLinesRemoved = existingLinesRemoved + (event.linesRemoved ?? 0);
 
       const fileStatus = {
         filePath: event.filePath,
@@ -286,6 +337,13 @@ export class MetricsCollector implements IMetricsCollector {
         reviewScore: event.reviewQualityScore || 0,
         isReviewed: event.isReviewed || false,
         linesGenerated: (existingStatus?.linesGenerated || 0) + (event.linesOfCode || 0),
+        linesChanged: (existingStatus?.linesChanged || 0) + (event.linesChanged || 0),
+        // CRITICAL FIX: Accumulate linesSinceReview instead of overwriting
+        // Each AI event should ADD to the total lines since last review, not replace it
+        // Event 1: 0 + 123 = 123, Event 2: 123 + 93 = 216 (not overwrite to 93)
+        linesSinceReview: calculatedLinesSinceReview,
+        linesAdded: newLinesAdded,
+        linesRemoved: newLinesRemoved,
         charactersCount: (existingStatus?.charactersCount || 0) + (event.charactersCount || 0),
         agentSessionId: event.agentSessionId,
         isAgentGenerated: event.isAgentMode || false,
@@ -301,25 +359,17 @@ export class MetricsCollector implements IMetricsCollector {
         editsMade: existingStatus?.editsMade || false,
         lastOpenedAt: existingStatus?.lastOpenedAt,
         reviewSessionsCount: existingStatus?.reviewSessionsCount || 0,
-        reviewedInTerminal: isFileCreationFromTerminal // Track if from terminal workflow
+        reviewedInTerminal: isFileCreationFromTerminal
       };
-
-      if (isFileCreationFromTerminal) {
-        // OPTION 2: Terminal files start as UNREVIEWED
-        // They will only get a real score when opened and reviewed in VS Code
-        // Don't fake a score - be honest about inability to measure terminal review quality
-        console.log(`[MetricsCollector] ⏭️ Terminal workflow file (unreviewed until opened in editor): ${event.filePath}`);
-      }
 
       this.fileReviewTracker.trackFile(fileStatus);
 
       // Persist to database
       this.metricsRepo.saveFileReviewStatus(fileStatus).catch(err => {
-        console.error('Failed to save file review status:', err);
+        console.error('[CodePause] Failed to save file review status:', err);
       });
 
       // Start FileReviewSessionTracker for ALL files
-      // Terminal files will get real scores when user opens them in editor later
       if (!this.fileReviewSessionTracker.isTracking(event.filePath)) {
         this.fileReviewSessionTracker.startTracking(
           event.filePath,
@@ -327,7 +377,48 @@ export class MetricsCollector implements IMetricsCollector {
           event.agentSessionId || 'manual-session',
           event.linesOfCode || 0
         );
-        console.log(`[MetricsCollector] Started review tracking for: ${event.filePath}`);
+      } else {
+        // File is already tracked - check if this is a NEW modification
+        // If AI adds MORE code to a file that was already reviewed, reset review progress
+        const existingSession = this.fileReviewSessionTracker.getSession(event.filePath);
+        if (existingSession) {
+          // Check if this is a new agent session (new modification)
+          const isNewAgentSession = existingSession.agentSessionId !== event.agentSessionId;
+
+          // Check if file was already reviewed (has a review score)
+          const wasAlreadyReviewed = existingSession.wasReviewed || existingSession.currentReviewScore > 0;
+
+          if (isNewAgentSession && wasAlreadyReviewed) {
+            // AI added new code to a file that was already reviewed
+            // CRITICAL FIX: Reset wasReviewed so file needs to be reviewed again
+            // This allows handleScrolling/handleCursorMovement/handleDocumentChange to track new interactions
+
+            // Reset review status - file needs to be reviewed again
+            existingSession.wasReviewed = false;
+            existingSession.currentReviewScore = 0;
+            existingSession.currentReviewQuality = ReviewQuality.None;
+
+            // Reset interaction counters
+            existingSession.scrollEventCount = 0;
+            existingSession.cursorMovementCount = 0;
+            existingSession.editsMade = false;
+
+            // Update tracking info
+            existingSession.agentSessionId = event.agentSessionId || 'manual-session';
+            existingSession.linesGenerated = (existingSession.linesGenerated || 0) + (event.linesOfCode || 0);
+            existingSession.generatedAt = event.timestamp;
+          } else if (isNewAgentSession && !wasAlreadyReviewed) {
+            // New agent session on file that wasn't reviewed yet - just update tracking
+
+            // Update tracking info but don't reset progress
+            existingSession.agentSessionId = event.agentSessionId || 'manual-session';
+            existingSession.linesGenerated = (existingSession.linesGenerated || 0) + (event.linesOfCode || 0);
+            existingSession.generatedAt = event.timestamp;
+          } else if (!isNewAgentSession) {
+            // Same agent session - just update line count for the same modification
+            existingSession.linesGenerated = (existingSession.linesGenerated || 0) + (event.linesOfCode || 0);
+          }
+        }
       }
     }
 
@@ -460,6 +551,9 @@ export class MetricsCollector implements IMetricsCollector {
   }
 
   async recordEvent(event: TrackingEvent): Promise<void> {
+    // Process event through handleEvent for file review tracking and other logic
+    this.handleEvent(event);
+    // Also save to database
     await this.metricsRepo.recordEvent(event);
   }
 
@@ -489,8 +583,6 @@ export class MetricsCollector implements IMetricsCollector {
     };
 
     this.resetSessionIdleTimer();
-
-    console.log('[CodePause] New coding session started:', this.currentSession.id);
   }
 
   private async endCurrentSession(): Promise<void> {
@@ -502,12 +594,7 @@ export class MetricsCollector implements IMetricsCollector {
     this.currentSession.endTime = now;
     this.currentSession.duration = now - this.currentSession.startTime;
 
-    // Save session
     await this.metricsRepo.saveSession(this.currentSession);
-
-    console.log('[CodePause] Session ended:', this.currentSession.id,
-      `(${this.currentSession.duration}ms, ${this.currentSession.eventCount} events)`);
-
     this.currentSession = null;
   }
 
@@ -533,15 +620,11 @@ export class MetricsCollector implements IMetricsCollector {
     this.eventBuffer = [];
 
     try {
-      // Record all events
       for (const event of events) {
         await this.metricsRepo.recordEvent(event);
       }
-
-      console.log(`[CodePause] Flushed ${events.length} events to database`);
     } catch (error) {
       console.error('[CodePause] Error flushing events:', error);
-      // Re-add events to buffer
       this.eventBuffer.unshift(...events);
     }
   }
@@ -560,7 +643,6 @@ export class MetricsCollector implements IMetricsCollector {
 
   private async performAggregation(): Promise<void> {
     try {
-      // Flush any pending events first
       await this.flushEventBuffer();
 
       // Sync file review sessions to database
@@ -569,47 +651,66 @@ export class MetricsCollector implements IMetricsCollector {
       const unreviewedFiles = this.fileReviewSessionTracker.getUnreviewedFiles();
 
       for (const session of [...reviewedFiles, ...unreviewedFiles]) {
+        // Preserve existing database values instead of overwriting with zeros
+        // Get the existing file status from the database tracker to preserve original data
+        const existingStatus = this.fileReviewTracker.getFileStatus(session.filePath, today, session.tool);
+
+        // CRITICAL FIX: Preserve higher database review score
+        // If the database already has a higher score (e.g., from manual or auto-review),
+        // don't overwrite it with a lower session score (e.g., from session timeout reset)
+        // Only update if:
+        // 1. Session score is higher than database score (user did more review), OR
+        // 2. Database doesn't have a score yet (new file)
+        const existingReviewScore = existingStatus?.reviewScore || 0;
+        const finalReviewScore = Math.max(existingReviewScore, session.currentReviewScore);
+
+        // Preserve existing review status if score was higher in database
+        const finalIsReviewed = existingStatus?.isReviewed || session.wasReviewed;
+
         const fileStatus = {
           filePath: session.filePath,
           date: today,
-          tool: session.tool, // Use the actual tool that generated the file
+          tool: session.tool,
           reviewQuality: session.currentReviewQuality,
-          reviewScore: session.currentReviewScore,
-          isReviewed: session.wasReviewed,
-          linesGenerated: session.linesGenerated,
-          charactersCount: 0,
+          reviewScore: finalReviewScore,
+          isReviewed: finalIsReviewed,
+          // Preserve original values from database, don't overwrite with zeros
+          linesGenerated: existingStatus?.linesGenerated || session.linesGenerated,
+          linesChanged: existingStatus?.linesChanged || session.linesGenerated, // Use linesGenerated as fallback for review scoring
+          // CRITICAL FIX: Don't send linesSinceReview in periodic aggregation
+          // This field should only be updated by actual AI events, not by periodic aggregation
+          // Sending stale cache values would corrupt the database accumulation logic
+          // The database will preserve the existing lines_since_review value when this is undefined
+          linesSinceReview: undefined,
+          charactersCount: existingStatus?.charactersCount || 0,
           agentSessionId: session.agentSessionId,
           isAgentGenerated: true,
           wasFileOpen: false,
-          firstGeneratedAt: session.generatedAt,
+          firstGeneratedAt: existingStatus?.firstGeneratedAt || session.generatedAt,
           lastReviewedAt: session.wasReviewed ? Date.now() : undefined,
           totalReviewTime: session.totalTimeInFocus,
-          language: undefined,
-          modificationCount: session.editsMade ? 1 : 0,
+          language: existingStatus?.language || undefined,
+          modificationCount: (existingStatus?.modificationCount || 0) + (session.editsMade ? 1 : 0),
           totalTimeInFocus: session.totalTimeInFocus,
           scrollEventCount: session.scrollEventCount,
           cursorMovementCount: session.cursorMovementCount,
           editsMade: session.editsMade,
           lastOpenedAt: session.lastOpenedAt,
-          reviewSessionsCount: 1
+          reviewSessionsCount: existingStatus?.reviewSessionsCount || 0
         };
 
         await this.metricsRepo.saveFileReviewStatus(fileStatus).catch(err => {
-          console.error('Failed to sync file review session:', err);
+          console.error('[CodePause] Failed to sync file review session:', err);
         });
       }
 
-      // Calculate today's metrics
       await this.metricsRepo.calculateDailyMetrics(today);
-
-      console.log('[CodePause] Daily metrics aggregated for', today);
     } catch (error) {
       console.error('[CodePause] Error during aggregation:', error);
     }
   }
 
   async triggerAggregation(): Promise<void> {
-    console.log('[CodePause] Manual aggregation triggered');
     await this.performAggregation();
   }
 
@@ -664,8 +765,6 @@ export class MetricsCollector implements IMetricsCollector {
     this.trackers.clear();
     this.pendingSuggestions.clear();
     this.isInitialized = false;
-
-    console.log('[CodePause] MetricsCollector disposed');
   }
 
   private generateSuggestionId(): string {

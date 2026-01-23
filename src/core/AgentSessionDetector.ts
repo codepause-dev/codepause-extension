@@ -115,8 +115,6 @@ export class AgentSessionDetector {
       alertShown: false
     };
 
-    console.log(`[AgentSessionDetector] 🤖 Agent session started: ${sessionId} (${event.tool})`);
-
     // Set maximum duration timer
     this.sessionStartTimer = setTimeout(() => {
       this.endSession('max_duration_reached');
@@ -144,7 +142,7 @@ export class AgentSessionDetector {
   /**
    * End current agent session
    */
-  endSession(reason: string): AgentSession | null {
+  endSession(_reason: string): AgentSession | null {
     if (!this.currentSession) {
       return null;
     }
@@ -152,11 +150,6 @@ export class AgentSessionDetector {
     const now = Date.now();
     this.currentSession.endTime = now;
     this.currentSession.duration = now - this.currentSession.startTime;
-
-    console.log(
-      `[AgentSessionDetector] 🛑 Agent session ended: ${this.currentSession.id} ` +
-      `(${reason}, ${this.currentSession.fileCount} files, ${this.currentSession.totalLines} lines)`
-    );
 
     // Clear timers
     if (this.sessionIdleTimer) {

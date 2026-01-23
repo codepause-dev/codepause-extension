@@ -37,8 +37,6 @@ export class EventDeduplicator {
       const timeDiff = event.timestamp - existing.timestamp;
 
       if (timeDiff < this.DEDUP_WINDOW_MS) {
-        // Duplicate detected within window
-        console.log(`[EventDeduplicator] Duplicate blocked: ${key}`);
         return true; // IS duplicate
       }
     }
@@ -69,9 +67,10 @@ export class EventDeduplicator {
     const filePath = event.filePath || 'unknown';
     const roundedTimestamp = Math.floor(event.timestamp / 100) * 100; // Round to 100ms
     const lines = event.linesOfCode || 0;
+    const linesRemoved = event.linesRemoved || 0;
     const chars = event.charactersCount || 0;
 
-    return `${filePath}:${roundedTimestamp}:${lines}:${chars}`;
+    return `${filePath}:${roundedTimestamp}:${lines}:${linesRemoved}:${chars}`;
   }
 
   /**

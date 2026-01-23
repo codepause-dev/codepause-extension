@@ -33,7 +33,15 @@ jest.mock('vscode', () => ({
       }),
       dispose: jest.fn()
     })),
-    openTextDocument: jest.fn()
+    openTextDocument: jest.fn(),
+    textDocuments: [], // Empty array of text documents
+    fs: {
+      stat: jest.fn(() => Promise.resolve({
+        mtime: Date.now() - 60000, // File modified 1 minute ago
+        ctime: Date.now() - 60000,
+        size: 1000
+      })) as any
+    } as any
   },
   window: {
     onDidChangeActiveTextEditor: jest.fn(() => ({ dispose: jest.fn() })),
@@ -715,8 +723,8 @@ describe('UnifiedAITracker', () => {
 
     it('should track visible editor changes', () => {
       const mockEditors = [
-        { document: { uri: { fsPath: '/test/file1.ts' } } },
-        { document: { uri: { fsPath: '/test/file2.ts' } } }
+        { document: { uri: { fsPath: '/test/file1.ts' }, getText: () => 'line1\nline2\nline3' } },
+        { document: { uri: { fsPath: '/test/file2.ts' }, getText: () => 'line1\nline2' } }
       ];
 
       if (mockHandlers.visibleEditorsChange) {
@@ -729,7 +737,7 @@ describe('UnifiedAITracker', () => {
 
     it('should clear and update open files', () => {
       const mockEditors1 = [
-        { document: { uri: { fsPath: '/test/file1.ts' } } }
+        { document: { uri: { fsPath: '/test/file1.ts' }, getText: () => 'line1\nline2\nline3' } }
       ];
 
       if (mockHandlers.visibleEditorsChange) {
@@ -737,7 +745,7 @@ describe('UnifiedAITracker', () => {
       }
 
       const mockEditors2 = [
-        { document: { uri: { fsPath: '/test/file2.ts' } } }
+        { document: { uri: { fsPath: '/test/file2.ts' }, getText: () => 'line1\nline2' } }
       ];
 
       if (mockHandlers.visibleEditorsChange) {
@@ -753,6 +761,159 @@ describe('UnifiedAITracker', () => {
       }
 
       expect(tracker.isActive()).toBe(true);
+    });
+  });
+
+  // BUG #2 FIX TESTS: Line Removals Not Tracked
+  describe('BUG #2: Line Removals Not Tracked Fix', () => {
+    beforeEach(async () => {
+      await tracker.initialize();
+    });
+
+    it('should calculate linesRemoved from rangeLength', () => {
+      const mockDocument = {
+        uri: { fsPath: '/test/file.ts' },
+        languageId: 'typescript'
+      };
+
+      // Simulate AI code edit with 120 characters removed (~3 lines at 40 chars/line)
+      const result = {
+        isAI: true,
+        confidence: 'high',
+        method: 'inline-completion-api',
+        metadata: {
+          linesOfCode: 2,        // 2 lines added
+          rangeLength: 120,      // 120 chars removed (~3 lines)
+          charactersCount: 80
+        }
+      };
+
+      mockOnEvent.mockClear();
+      (tracker as any).emitAIEvent(result, mockDocument);
+
+      expect(mockOnEvent).toHaveBeenCalled();
+      const emittedEvent = mockOnEvent.mock.calls[0][0] as any;
+
+      // linesRemoved should be calculated: 120 / 40 = 3 lines
+      expect(emittedEvent.linesRemoved).toBe(3);
+      expect(emittedEvent.linesChanged).toBe(5); // 2 added + 3 removed
+    });
+
+    it('should include linesRemoved in linesChanged calculation', () => {
+      const mockDocument = {
+        uri: { fsPath: '/test/file.ts' },
+        languageId: 'typescript'
+      };
+
+      // Simulate 10 lines added + 5 lines removed
+      const result = {
+        isAI: true,
+        confidence: 'high',
+        method: 'inline-completion-api',
+        metadata: {
+          linesOfCode: 10,       // 10 lines added
+          rangeLength: 200,      // ~5 lines removed (200 / 40 = 5)
+          charactersCount: 400
+        }
+      };
+
+      mockOnEvent.mockClear();
+      (tracker as any).emitAIEvent(result, mockDocument);
+
+      expect(mockOnEvent).toHaveBeenCalled();
+      const emittedEvent = mockOnEvent.mock.calls[0][0] as any;
+
+      // linesChanged should include both additions and removals
+      expect(emittedEvent.linesRemoved).toBe(5);   // 200 / 40
+      expect(emittedEvent.linesChanged).toBe(15);  // 10 + 5
+    });
+
+    it('should emit event for small line removals (bug fix)', () => {
+      const mockDocument = {
+        uri: { fsPath: '/test/file.ts' },
+        languageId: 'typescript'
+      };
+
+      // Small removal: 3 lines (~120 chars)
+      const result = {
+        isAI: true,
+        confidence: 'high',
+        method: 'inline-completion-api',
+        metadata: {
+          linesOfCode: 1,        // Small replacement
+          rangeLength: 120,      // 3 lines removed
+          charactersCount: 50
+        }
+      };
+
+      mockOnEvent.mockClear();
+      (tracker as any).emitAIEvent(result, mockDocument);
+
+      // Before fix: event might not be emitted for small removals
+      // After fix: event should be emitted with linesRemoved
+      expect(mockOnEvent).toHaveBeenCalled();
+      const emittedEvent = mockOnEvent.mock.calls[0][0] as any;
+      expect(emittedEvent.linesRemoved).toBe(3);
+    });
+
+    it('should not skip events with only deletions and no additions', () => {
+      const mockDocument = {
+        uri: { fsPath: '/test/file.ts' },
+        languageId: 'typescript'
+      };
+
+      // Pure deletion: no text added, only removed
+      const result = {
+        isAI: true,
+        confidence: 'high',
+        method: 'inline-completion-api',
+        metadata: {
+          linesOfCode: 0,        // No lines added
+          rangeLength: 400,      // 10 lines removed (400 / 40 = 10)
+          charactersCount: 0
+        }
+      };
+
+      mockOnEvent.mockClear();
+      (tracker as any).emitAIEvent(result, mockDocument);
+
+      // Before fix: Would skip event with linesOfCode=0
+      // After fix: Should emit event with linesRemoved > 0
+      expect(mockOnEvent).toHaveBeenCalled();
+      const emittedEvent = mockOnEvent.mock.calls[0][0] as any;
+      expect(emittedEvent.linesOfCode).toBe(0);    // No lines added
+      expect(emittedEvent.linesRemoved).toBe(10);  // Lines removed
+      expect(emittedEvent.linesChanged).toBe(10);  // Total changes
+    });
+
+    it('should track line removals in mixed operations (bug report test case)', () => {
+      const mockDocument = {
+        uri: { fsPath: '/test/testfile.ts' },
+        languageId: 'typescript'
+      };
+
+      // From bug report: testfile.ts with 36 lines, removed 8 lines
+      const result = {
+        isAI: true,
+        confidence: 'high',
+        method: 'external-file-change',
+        metadata: {
+          linesOfCode: 0,        // Removed methods
+          rangeLength: 320,      // ~8 lines removed (320 / 40 = 8)
+          charactersCount: 0
+        }
+      };
+
+      mockOnEvent.mockClear();
+      (tracker as any).emitAIEvent(result, mockDocument);
+
+      expect(mockOnEvent).toHaveBeenCalled();
+      const emittedEvent = mockOnEvent.mock.calls[0][0] as any;
+
+      // From bug report: linesSinceReview should increase by 8
+      // This requires linesRemoved to be tracked
+      expect(emittedEvent.linesRemoved).toBe(8);
+      expect(emittedEvent.linesChanged).toBe(8);
     });
   });
 });

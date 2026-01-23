@@ -32,11 +32,11 @@ interface ScoringConfig {
 function getBaseReviewSpeed(level: DeveloperLevel): { msPerLine: number; baseThreshold: number } {
   switch (level) {
     case DeveloperLevel.Junior:
-      return { msPerLine: 600, baseThreshold: 50 };  // 600ms per line (need time to understand)
+      return { msPerLine: 600, baseThreshold: 60 };  // 600ms per line (need time to understand)
     case DeveloperLevel.Mid:
-      return { msPerLine: 400, baseThreshold: 40 };  // 400ms per line (balanced review speed)
+      return { msPerLine: 400, baseThreshold: 50 };  // 400ms per line (balanced review speed)
     case DeveloperLevel.Senior:
-      return { msPerLine: 200, baseThreshold: 30 };  // 200ms per line (experienced, faster)
+      return { msPerLine: 200, baseThreshold: 40 };  // 200ms per line (experienced, faster)
   }
 }
 
@@ -102,7 +102,6 @@ export class FileReviewSessionTracker {
    */
   setDeveloperLevel(level: DeveloperLevel): void {
     this.developerLevel = level;
-    console.log(`[FileReviewSessionTracker] Developer level updated to: ${level}`);
   }
 
   /**
@@ -176,8 +175,6 @@ export class FileReviewSessionTracker {
         this.handleDocumentChange(event);
       })
     );
-
-    console.log('[FileReviewSessionTracker] Initialized VSCode API hooks');
   }
 
   /**
@@ -197,22 +194,23 @@ export class FileReviewSessionTracker {
           const timeSinceLastView = session.lastOpenedAt ? now - session.lastOpenedAt : 0;
           const isSessionExpired = timeSinceLastView > SESSION_TIMEOUT_MS;
 
-          // If session expired, reset review score (but keep time tracking for metrics)
+          // If session expired, reset review progress (but keep time tracking for metrics)
+          // Don't reset wasReviewed if file was already marked as reviewed
           if (isSessionExpired && session.currentReviewScore > 0) {
-            const minutesInactive = Math.round(timeSinceLastView / 60000);
-            console.log(
-              `[FileReviewSessionTracker] Session timeout on startup: ${filePath} ` +
-              `(inactive for ${minutesInactive} minutes, resetting review score from ${session.currentReviewScore})`
-            );
+            const wasAlreadyReviewed = session.wasReviewed;
 
             // Reset review progress (context lost after 1 hour)
-            session.currentReviewScore = 0;
-            session.currentReviewQuality = ReviewQuality.None;
+            // BUT: Preserve wasReviewed status if file was already reviewed
+            if (!wasAlreadyReviewed) {
+              session.currentReviewScore = 0;
+              session.currentReviewQuality = ReviewQuality.None;
+              session.wasReviewed = false;
+            }
+
+            // Always reset interaction counters (start fresh for next review session)
             session.scrollEventCount = 0;
             session.cursorMovementCount = 0;
             session.editsMade = false;
-            session.wasReviewed = false;
-            // Note: totalTimeInFocus is NOT reset - we keep it for metrics
           }
 
           // Update first/last opened timestamps
@@ -224,7 +222,6 @@ export class FileReviewSessionTracker {
 
         this.currentActiveFile = filePath;
         this.sessionStartTime = Date.now();
-        console.log(`[FileReviewSessionTracker] Started timer for already-open tracked file: ${filePath}`);
       }
     }
   }
@@ -240,9 +237,6 @@ export class FileReviewSessionTracker {
   ): void {
     // Check if file was generated within grace period
     const now = Date.now();
-
-    // Calculate dynamic thresholds based on file size
-    const customScoring = calculateDynamicThresholds(linesGenerated, this.developerLevel);
 
     const session: FileReviewSession = {
       filePath,
@@ -261,11 +255,6 @@ export class FileReviewSessionTracker {
     };
 
     this.activeSessions.set(filePath, session);
-
-    console.log(
-      `[FileReviewSessionTracker] Started tracking: ${filePath} ` +
-      `(${linesGenerated} lines, expected review time: ${Math.round(customScoring.lightReviewTime / 1000)}s, session: ${agentSessionId})`
-    );
   }
 
   /**
@@ -305,33 +294,26 @@ export class FileReviewSessionTracker {
         }
         session.lastOpenedAt = now;
 
-        // If session expired, reset review score (but keep time tracking for metrics)
+        // If session expired, reset review progress (but keep time tracking for metrics)
         if (isSessionExpired && session.currentReviewScore > 0) {
-          const minutesInactive = Math.round(timeSinceLastView / 60000);
-          console.log(
-            `[FileReviewSessionTracker] Session timeout: ${filePath} ` +
-            `(inactive for ${minutesInactive} minutes, resetting review score from ${session.currentReviewScore})`
-          );
+          const wasAlreadyReviewed = session.wasReviewed;
 
-          // Reset review progress (context lost after 1 hour)
-          session.currentReviewScore = 0;
-          session.currentReviewQuality = ReviewQuality.None;
+          // Preserve wasReviewed status if file was already reviewed
+          if (!wasAlreadyReviewed) {
+            session.currentReviewScore = 0;
+            session.currentReviewQuality = ReviewQuality.None;
+            session.wasReviewed = false;
+          }
+
+          // Reset interaction counters
           session.scrollEventCount = 0;
           session.cursorMovementCount = 0;
           session.editsMade = false;
-          session.wasReviewed = false;
-          // Note: totalTimeInFocus is NOT reset - we keep it for metrics
         }
-
-        console.log(`[FileReviewSessionTracker] File opened: ${filePath} (scheme: ${editor.document.uri.scheme})`);
-      } else {
-        console.log(`[FileReviewSessionTracker] File opened but not tracked: ${filePath} (scheme: ${editor.document.uri.scheme})`);
-        console.log(`[FileReviewSessionTracker]    Active sessions: ${Array.from(this.activeSessions.keys()).join(', ') || 'none'}`);
       }
     } else {
       this.currentActiveFile = null;
       this.sessionStartTime = 0;
-      console.log(`[FileReviewSessionTracker] Editor closed`);
     }
   }
 
@@ -347,6 +329,11 @@ export class FileReviewSessionTracker {
     const session = this.activeSessions.get(filePath);
 
     if (session) {
+      // Skip tracking if file is already reviewed
+      if (session.wasReviewed) {
+        return;
+      }
+
       // CRITICAL FIX: Update time in focus BEFORE incrementing scroll count
       // This ensures scrolling time is counted toward review time
       if (this.currentActiveFile === filePath && this.sessionStartTime > 0) {
@@ -357,9 +344,6 @@ export class FileReviewSessionTracker {
       }
 
       session.scrollEventCount++;
-      console.log(`[FileReviewSessionTracker] Scroll detected: ${filePath} (count: ${session.scrollEventCount}, score: ${session.currentReviewScore})`);
-
-      // Calculate score and update review status
       this.updateReviewScore(session);
     }
   }
@@ -376,6 +360,11 @@ export class FileReviewSessionTracker {
     const session = this.activeSessions.get(filePath);
 
     if (session) {
+      // Skip tracking if file is already reviewed
+      if (session.wasReviewed) {
+        return;
+      }
+
       // CRITICAL FIX: Update time in focus on cursor movement
       if (this.currentActiveFile === filePath && this.sessionStartTime > 0) {
         const now = Date.now();
@@ -385,11 +374,6 @@ export class FileReviewSessionTracker {
       }
 
       session.cursorMovementCount++;
-      if (session.cursorMovementCount % 5 === 0) {  // Log every 5 movements to avoid spam
-        console.log(`[FileReviewSessionTracker] Cursor movement: ${filePath} (count: ${session.cursorMovementCount}, score: ${session.currentReviewScore})`);
-      }
-
-      // Calculate score and update review status
       this.updateReviewScore(session);
     }
   }
@@ -406,6 +390,11 @@ export class FileReviewSessionTracker {
     const session = this.activeSessions.get(filePath);
 
     if (session && event.contentChanges.length > 0) {
+      // Skip tracking if file is already reviewed
+      if (session.wasReviewed) {
+        return;
+      }
+
       // CRITICAL FIX: Update time in focus on edits
       if (this.currentActiveFile === filePath && this.sessionStartTime > 0) {
         const now = Date.now();
@@ -414,12 +403,21 @@ export class FileReviewSessionTracker {
         this.sessionStartTime = now; // Reset timer
       }
 
-      session.editsMade = true;
+      // CRITICAL FIX: Only count SMALL edits as manual review edits
+      // Large pastes (>300 chars) are likely AI-generated and shouldn't count as "review"
+      // This prevents AI code additions from falsely marking files as reviewed
+      let totalChars = 0;
+      for (const change of event.contentChanges) {
+        totalChars += change.text.length;
+      }
 
-      // Calculate score and update review status
+      // Only count as manual edit if it's small (< 300 chars) and not a pure deletion
+      const isManualEdit = totalChars > 0 && totalChars < 300;
+      if (isManualEdit && !session.editsMade) {
+        session.editsMade = true;
+      }
+
       this.updateReviewScore(session);
-
-      console.log(`[FileReviewSessionTracker] Edits made to: ${filePath}`);
     }
   }
 
@@ -440,6 +438,9 @@ export class FileReviewSessionTracker {
   /**
    * Calculate review score based on tracking data
    * Uses DYNAMIC thresholds based on file size/complexity
+   *
+   * CRITICAL FIX: Only count time in focus if there are ACTIVE interactions
+   * Passive file opening (no scrolling, no cursor movement, no edits) should NOT trigger auto-review
    */
   private updateReviewScore(session: FileReviewSession): void {
     // Calculate custom scoring thresholds for THIS specific file
@@ -447,17 +448,36 @@ export class FileReviewSessionTracker {
 
     let score = 0;
 
+    // CRITICAL FIX: Require meaningful interaction, not just passive file opening
+    // - Opening file = 1-2 cursor moves (automatic, not review)
+    // - Tab switch = 1-2 cursor moves (automatic, not review)
+    // - Actual review = 5+ cursor moves (user navigating through code)
+    const MIN_CURSOR_MOVEMENTS = 5;
+    const MIN_SCROLL_EVENTS = 1; // Scrolling is always intentional
+
+    const hasActiveInteractions = session.scrollEventCount >= MIN_SCROLL_EVENTS ||
+                                    session.cursorMovementCount >= MIN_CURSOR_MOVEMENTS ||
+                                    session.editsMade;
+
     // Factor 1: Time in focus (thresholds scale with file size)
-    if (session.totalTimeInFocus >= customScoring.thoroughReviewTime) {
-      score += 80; // Thorough review
-    } else if (session.totalTimeInFocus >= customScoring.lightReviewTime) {
-      score += 50; // Light review
+    // ONLY count time if there are active interactions (scrolling, cursor movement, or edits)
+    if (hasActiveInteractions) {
+      if (session.totalTimeInFocus >= customScoring.thoroughReviewTime) {
+        score += 80; // Thorough review
+      } else if (session.totalTimeInFocus >= customScoring.lightReviewTime) {
+        score += 50; // Light review
+      } else {
+        // Proportional score for less time
+        score += Math.min(
+          (session.totalTimeInFocus / customScoring.lightReviewTime) * 30,
+          30
+        );
+      }
     } else {
-      // Proportional score for less time
-      score += Math.min(
-        (session.totalTimeInFocus / customScoring.lightReviewTime) * 30,
-        30
-      );
+      // No active interactions - passive file opening doesn't count
+      // User just has the file open but isn't actually reviewing it
+      // Give 0 points for time to prevent accidental auto-review
+      score += 0;
     }
 
     // Factor 2: Scroll events (engaged reading)
@@ -476,8 +496,6 @@ export class FileReviewSessionTracker {
     // Cap score at 100
     score = Math.min(score, 100);
 
-    // Check if status changed
-    const previousScore = session.currentReviewScore;
     const wasReviewedBefore = session.wasReviewed;
 
     // Update session
@@ -497,27 +515,11 @@ export class FileReviewSessionTracker {
       session.wasReviewed = true;
     }
 
-    // Log significant changes
+    // Notify when file becomes reviewed
     if (!wasReviewedBefore && session.wasReviewed) {
-      console.log(`[FileReviewSessionTracker] File marked as REVIEWED: ${session.filePath}`);
-      console.log(`[FileReviewSessionTracker]    Score: ${score} (threshold: ${customScoring.reviewedThreshold})`);
-      console.log(`[FileReviewSessionTracker]    Quality: ${session.currentReviewQuality}`);
-      console.log(`[FileReviewSessionTracker]    Time in focus: ${Math.round(session.totalTimeInFocus / 1000)}s (expected: ${Math.round(customScoring.lightReviewTime / 1000)}s)`);
-      console.log(`[FileReviewSessionTracker]    File size: ${session.linesGenerated} lines`);
-      console.log(`[FileReviewSessionTracker]    Developer level: ${this.developerLevel}`);
-      console.log(`[FileReviewSessionTracker]    Scrolls: ${session.scrollEventCount}, Cursor: ${session.cursorMovementCount}, Edits: ${session.editsMade}`);
-
-      // FIXED: Immediately notify when file becomes reviewed (for instant UI update)
       if (this.onFileReviewed) {
         this.onFileReviewed(session);
-        console.log(`[FileReviewSessionTracker]    Database updated via callback`);
-      } else {
-        console.log(`[FileReviewSessionTracker]    WARNING: No callback set - database NOT updated!`);
       }
-    } else if (Math.abs(score - previousScore) >= 10) {
-      console.log(`[FileReviewSessionTracker] Review score updated: ${session.filePath} (${previousScore} -> ${score}, reviewed: ${session.wasReviewed})`);
-    } else if (score >= 30 && previousScore < 30) {
-      console.log(`[FileReviewSessionTracker] Progress: ${session.filePath} (score: ${score}/${customScoring.reviewedThreshold} needed for auto-review)`);
     }
   }
 
@@ -602,12 +604,6 @@ export class FileReviewSessionTracker {
         this.activeSessions.delete(filePath);
         cleanedCount++;
       }
-    }
-
-    if (cleanedCount > 0) {
-      console.log(
-        `[FileReviewSessionTracker] Cleaned up ${cleanedCount} expired sessions`
-      );
     }
 
     return cleanedCount;
@@ -698,7 +694,5 @@ export class FileReviewSessionTracker {
 
     this.disposables = [];
     this.clear();
-
-    console.log('[FileReviewSessionTracker] Disposed');
   }
 }

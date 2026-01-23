@@ -56,7 +56,8 @@ describe('MetricsCollector', () => {
       recordEvent: jest.fn<() => Promise<number>>().mockResolvedValue(1),
       getDailyMetrics: jest.fn<() => Promise<DailyMetrics | null>>().mockResolvedValue(null),
       saveSession: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
-      calculateDailyMetrics: jest.fn<() => Promise<DailyMetrics>>().mockResolvedValue(createMockDailyMetrics())
+      calculateDailyMetrics: jest.fn<() => Promise<DailyMetrics>>().mockResolvedValue(createMockDailyMetrics()),
+      saveFileReviewStatus: jest.fn<() => Promise<void>>().mockResolvedValue(undefined)
     } as unknown as jest.Mocked<MetricsRepository>;
 
     mockConfigManager = {
@@ -558,7 +559,7 @@ describe('MetricsCollector', () => {
     beforeEach(async () => {
       // Add saveFileReviewStatus to mock
       mockMetricsRepo.saveFileReviewStatus = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
 
       await collector.initialize();
     });
@@ -613,42 +614,74 @@ describe('MetricsCollector', () => {
 
   describe('Restore Unreviewed File Tracking', () => {
     it('should restore tracking for unreviewed files', async () => {
-      const unreviewedFiles = [
+      const allFiles = [
         {
           filePath: '/test/unreviewed1.ts',
           tool: AITool.Copilot,
           linesGenerated: 50,
           agentSessionId: 'session-123',
-          date: new Date().toISOString().split('T')[0]
+          date: new Date().toISOString().split('T')[0],
+          isReviewed: false,
+          linesSinceReview: 50,
+          reviewScore: 0,
+          reviewQuality: 'none' as any,
+          charactersCount: 0,
+          isAgentGenerated: true,
+          wasFileOpen: false,
+          firstGeneratedAt: Date.now(),
+          totalReviewTime: 0,
+          modificationCount: 0,
+          totalTimeInFocus: 0,
+          scrollEventCount: 0,
+          cursorMovementCount: 0,
+          editsMade: false,
+          reviewSessionsCount: 0,
+          reviewedInTerminal: false
         },
         {
           filePath: '/test/unreviewed2.ts',
           tool: AITool.Cursor,
           linesGenerated: 30,
           agentSessionId: 'session-456',
-          date: new Date().toISOString().split('T')[0]
+          date: new Date().toISOString().split('T')[0],
+          isReviewed: false,
+          linesSinceReview: 30,
+          reviewScore: 0,
+          reviewQuality: 'none' as any,
+          charactersCount: 0,
+          isAgentGenerated: true,
+          wasFileOpen: false,
+          firstGeneratedAt: Date.now(),
+          totalReviewTime: 0,
+          modificationCount: 0,
+          totalTimeInFocus: 0,
+          scrollEventCount: 0,
+          cursorMovementCount: 0,
+          editsMade: false,
+          reviewSessionsCount: 0,
+          reviewedInTerminal: false
         }
       ];
 
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>()
-        .mockResolvedValue(unreviewedFiles);
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>()
+        .mockResolvedValue(allFiles);
 
       await collector.initialize();
 
-      expect(mockMetricsRepo.getUnreviewedFiles).toHaveBeenCalled();
+      expect(mockMetricsRepo.getFileReviewsForDate).toHaveBeenCalled();
     });
 
     it('should handle no unreviewed files gracefully', async () => {
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>()
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>()
         .mockResolvedValue([]);
 
       await collector.initialize();
 
-      expect(mockMetricsRepo.getUnreviewedFiles).toHaveBeenCalled();
+      expect(mockMetricsRepo.getFileReviewsForDate).toHaveBeenCalled();
     });
 
     it('should handle errors during restoration', async () => {
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>()
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>()
         .mockRejectedValue(new Error('Database error'));
 
       // Should not throw - initialization should continue
@@ -659,7 +692,7 @@ describe('MetricsCollector', () => {
   describe('Review Quality Analysis', () => {
     beforeEach(async () => {
       mockMetricsRepo.saveFileReviewStatus = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
 
       await collector.initialize();
     });
@@ -715,7 +748,7 @@ describe('MetricsCollector', () => {
   describe('Agent Session Detection', () => {
     beforeEach(async () => {
       mockMetricsRepo.saveFileReviewStatus = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
 
       await collector.initialize();
     });
@@ -756,7 +789,7 @@ describe('MetricsCollector', () => {
   describe('Terminal File Creation', () => {
     beforeEach(async () => {
       mockMetricsRepo.saveFileReviewStatus = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
 
       await collector.initialize();
     });
@@ -842,7 +875,7 @@ describe('MetricsCollector', () => {
   describe('Edge Cases', () => {
     beforeEach(async () => {
       mockMetricsRepo.saveFileReviewStatus = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
 
       await collector.initialize();
     });
@@ -898,7 +931,7 @@ describe('MetricsCollector', () => {
   describe('Event Type Handlers', () => {
     beforeEach(async () => {
       mockMetricsRepo.saveFileReviewStatus = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
 
       await collector.initialize();
     });
@@ -985,7 +1018,7 @@ describe('MetricsCollector', () => {
   describe('Session AI vs Manual Code Tracking', () => {
     beforeEach(async () => {
       mockMetricsRepo.saveFileReviewStatus = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
 
       await collector.initialize();
     });
@@ -1015,7 +1048,7 @@ describe('MetricsCollector', () => {
   describe('Event Buffer Flushing', () => {
     beforeEach(async () => {
       mockMetricsRepo.saveFileReviewStatus = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
 
       await collector.initialize();
     });
@@ -1039,7 +1072,7 @@ describe('MetricsCollector', () => {
   describe('Event Emission to Handlers', () => {
     beforeEach(async () => {
       mockMetricsRepo.saveFileReviewStatus = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
 
       await collector.initialize();
     });
@@ -1087,7 +1120,7 @@ describe('MetricsCollector', () => {
   describe('Pending Suggestion Management', () => {
     beforeEach(async () => {
       mockMetricsRepo.saveFileReviewStatus = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
 
       await collector.initialize();
     });
@@ -1171,7 +1204,7 @@ describe('MetricsCollector', () => {
   describe('Aggregation', () => {
     beforeEach(async () => {
       mockMetricsRepo.saveFileReviewStatus = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
 
       await collector.initialize();
     });
@@ -1208,7 +1241,7 @@ describe('MetricsCollector', () => {
   describe('Session Management', () => {
     beforeEach(async () => {
       mockMetricsRepo.saveFileReviewStatus = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
 
       await collector.initialize();
     });
@@ -1250,7 +1283,7 @@ describe('MetricsCollector', () => {
   describe('Disposal and Cleanup', () => {
     it('should dispose cleanly', async () => {
       mockMetricsRepo.saveFileReviewStatus = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
-      mockMetricsRepo.getUnreviewedFiles = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
 
       await collector.initialize();
 
@@ -1261,6 +1294,170 @@ describe('MetricsCollector', () => {
       const freshCollector = new MetricsCollector(mockMetricsRepo, mockConfigManager);
 
       await expect(freshCollector.dispose()).resolves.not.toThrow();
+    });
+  });
+
+  describe('Line Removal Tracking', () => {
+    beforeEach(async () => {
+      mockMetricsRepo.saveFileReviewStatus = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
+      mockMetricsRepo.getFileReviewsForDate = jest.fn<() => Promise<any[]>>().mockResolvedValue([]);
+      await collector.initialize();
+    });
+
+    it('should track line removals and update linesSinceReview', async () => {
+      const event: TrackingEvent = {
+        timestamp: Date.now(),
+        tool: AITool.Copilot,
+        source: CodeSource.AI,
+        eventType: EventType.CodeGenerated,
+        linesOfCode: 0,
+        linesRemoved: 50,
+        linesChanged: 50,
+        filePath: '/path/to/file.ts',
+        language: 'typescript'
+      };
+
+      await collector.recordEvent(event);
+
+      expect(mockMetricsRepo.saveFileReviewStatus).toHaveBeenCalled();
+      const savedStatus = (mockMetricsRepo.saveFileReviewStatus as jest.Mock).mock.calls[0][0] as any;
+      expect(savedStatus.linesSinceReview).toBe(50);
+      expect(savedStatus.linesAdded).toBe(0);
+      expect(savedStatus.linesRemoved).toBe(50);
+    });
+
+    it('should accumulate both additions and removals', async () => {
+      // First event: add 30 lines
+      const addEvent: TrackingEvent = {
+        timestamp: Date.now(),
+        tool: AITool.Copilot,
+        source: CodeSource.AI,
+        eventType: EventType.CodeGenerated,
+        linesOfCode: 30,
+        linesRemoved: 0,
+        linesChanged: 30,
+        filePath: '/path/to/file.ts',
+        language: 'typescript'
+      };
+
+      await collector.recordEvent(addEvent);
+
+      const firstCall = (mockMetricsRepo.saveFileReviewStatus as jest.Mock).mock.calls[0][0] as any;
+      expect(firstCall.linesSinceReview).toBe(30);
+      expect(firstCall.linesAdded).toBe(30);
+      expect(firstCall.linesRemoved).toBe(0);
+
+      // Second event: remove 20 lines
+      const removeEvent: TrackingEvent = {
+        timestamp: Date.now(),
+        tool: AITool.Copilot,
+        source: CodeSource.AI,
+        eventType: EventType.CodeGenerated,
+        linesOfCode: 0,
+        linesRemoved: 20,
+        linesChanged: 20,
+        filePath: '/path/to/file.ts',
+        language: 'typescript'
+      };
+
+      await collector.recordEvent(removeEvent);
+
+      const secondCall = (mockMetricsRepo.saveFileReviewStatus as jest.Mock).mock.calls[1][0] as any;
+      expect(secondCall.linesSinceReview).toBe(50); // 30 + 20
+      expect(secondCall.linesAdded).toBe(30);
+      expect(secondCall.linesRemoved).toBe(20);
+    });
+
+    it('should handle mixed add/remove in single event', async () => {
+      const mixedEvent: TrackingEvent = {
+        timestamp: Date.now(),
+        tool: AITool.Copilot,
+        source: CodeSource.AI,
+        eventType: EventType.CodeGenerated,
+        linesOfCode: 25,
+        linesRemoved: 30,
+        linesChanged: 55,
+        filePath: '/path/to/file.ts',
+        language: 'typescript'
+      };
+
+      await collector.recordEvent(mixedEvent);
+
+      const savedStatus = (mockMetricsRepo.saveFileReviewStatus as jest.Mock).mock.calls[0][0] as any;
+      expect(savedStatus.linesSinceReview).toBe(55); // 25 + 30
+      expect(savedStatus.linesAdded).toBe(25);
+      expect(savedStatus.linesRemoved).toBe(30);
+    });
+
+    it('should fall back to linesOfCode + linesRemoved when linesChanged is undefined', async () => {
+      const event: TrackingEvent = {
+        timestamp: Date.now(),
+        tool: AITool.Copilot,
+        source: CodeSource.AI,
+        eventType: EventType.CodeGenerated,
+        linesOfCode: 10,
+        linesRemoved: 5,
+        // linesChanged is undefined
+        filePath: '/path/to/file.ts',
+        language: 'typescript'
+      };
+
+      await collector.recordEvent(event);
+
+      const savedStatus = (mockMetricsRepo.saveFileReviewStatus as jest.Mock).mock.calls[0][0] as any;
+      expect(savedStatus.linesSinceReview).toBe(15); // 10 + 5
+    });
+
+    it('should reset linesAdded and linesRemoved when file is reviewed', async () => {
+      // First event: add 30 lines
+      const addEvent: TrackingEvent = {
+        timestamp: Date.now(),
+        tool: AITool.Copilot,
+        source: CodeSource.AI,
+        eventType: EventType.CodeGenerated,
+        linesOfCode: 30,
+        linesRemoved: 0,
+        linesChanged: 30,
+        filePath: '/path/to/file.ts',
+        language: 'typescript'
+      };
+
+      await collector.recordEvent(addEvent);
+
+      // Review the file
+      const reviewEvent: TrackingEvent = {
+        timestamp: Date.now(),
+        tool: AITool.Copilot,
+        source: CodeSource.AI,
+        eventType: EventType.CodeGenerated,
+        linesOfCode: 0,
+        linesRemoved: 0,
+        isReviewed: true,
+        filePath: '/path/to/file.ts',
+        language: 'typescript'
+      };
+
+      await collector.recordEvent(reviewEvent);
+
+      // Add more lines after review
+      const afterReviewEvent: TrackingEvent = {
+        timestamp: Date.now(),
+        tool: AITool.Copilot,
+        source: CodeSource.AI,
+        eventType: EventType.CodeGenerated,
+        linesOfCode: 0,
+        linesRemoved: 10,
+        linesChanged: 10,
+        filePath: '/path/to/file.ts',
+        language: 'typescript'
+      };
+
+      await collector.recordEvent(afterReviewEvent);
+
+      const finalCall = (mockMetricsRepo.saveFileReviewStatus as jest.Mock).mock.calls[2][0] as any;
+      expect(finalCall.linesSinceReview).toBe(10); // Reset after review
+      expect(finalCall.linesAdded).toBe(0);
+      expect(finalCall.linesRemoved).toBe(10);
     });
   });
 });

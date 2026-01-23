@@ -1,6 +1,6 @@
 /**
  * BaseTracker
- * Abstract base class for all AI tool trackers
+ * Abstract base class for most of AI trackers
  */
 
 import * as vscode from 'vscode';
@@ -33,6 +33,8 @@ export abstract class BaseTracker implements ITracker {
       tool: this.tool,
       eventType: event.eventType!,
       linesOfCode: event.linesOfCode,
+      linesRemoved: event.linesRemoved,
+      linesChanged: event.linesChanged,
       charactersCount: event.charactersCount,
       acceptanceTimeDelta: event.acceptanceTimeDelta,
       filePath: event.filePath,
@@ -128,6 +130,12 @@ export abstract class BaseTracker implements ITracker {
       return false;
     }
 
+    // Skip internal CodePause files
+    const filePath = document.uri.fsPath;
+    if (filePath && filePath.includes('codepause-baselines.json')) {
+      return false;
+    }
+
     return true;
   }
 
@@ -135,8 +143,8 @@ export abstract class BaseTracker implements ITracker {
     return `${this.tool}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   }
 
-  protected log(message: string, ...args: unknown[]): void {
-    console.log(`[CodePause:${this.tool}]`, message, ...args);
+  protected log(_message: string, ..._args: unknown[]): void {
+    // Logging disabled in production
   }
 
   protected logError(message: string, error?: unknown): void {

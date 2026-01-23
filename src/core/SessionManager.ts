@@ -35,8 +35,6 @@ export class SessionManager {
 
     this.resetIdleTimer();
 
-    console.log('[CodePause:SessionManager] New session started:', this.currentSession.id);
-
     return this.currentSession;
   }
 
@@ -91,11 +89,6 @@ export class SessionManager {
     // Save session to database
     try {
       await this.metricsRepo.saveSession(this.currentSession);
-      console.log(
-        '[CodePause:SessionManager] Session ended:',
-        this.currentSession.id,
-        `(${this.formatDuration(this.currentSession.duration)}, ${this.currentSession.eventCount} events)`
-      );
     } catch (error) {
       console.error('[CodePause:SessionManager] Error saving session:', error);
     }
@@ -123,7 +116,6 @@ export class SessionManager {
     }
 
     this.idleTimer = setTimeout(() => {
-      console.log('[CodePause:SessionManager] Session idle timeout');
       this.endSession();
     }, SESSION_IDLE_TIMEOUT_MS);
   }
@@ -193,19 +185,5 @@ export class SessionManager {
     const timestamp = Date.now();
     const random = Math.random().toString(36).substring(2, 11);
     return `session-${timestamp}-${random}`;
-  }
-
-  private formatDuration(ms: number): string {
-    const seconds = Math.floor(ms / 1000);
-    const minutes = Math.floor(seconds / 60);
-    const hours = Math.floor(minutes / 60);
-
-    if (hours > 0) {
-      return `${hours}h ${minutes % 60}m`;
-    } else if (minutes > 0) {
-      return `${minutes}m ${seconds % 60}s`;
-    } else {
-      return `${seconds}s`;
-    }
   }
 }
