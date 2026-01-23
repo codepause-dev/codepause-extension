@@ -38,23 +38,18 @@ export class NativeModuleHelper {
     // Check cache to see if we already rebuilt for this version
     const cacheFile = path.join(extensionPath, this.CACHE_FILE);
     if (await this.isCacheValid(cacheFile, electronVersion, nodeModuleVersion)) {
-      console.log(`[NativeModuleHelper] better-sqlite3 already built for Electron ${electronVersion} (ABI ${nodeModuleVersion})`);
       return;
     }
 
     // Try to load the module first
     if (await this.canLoadModule(extensionPath)) {
-      console.log(`[NativeModuleHelper] better-sqlite3 loads successfully, updating cache`);
       await this.updateCache(cacheFile, electronVersion, nodeModuleVersion);
       return;
     }
 
-    console.log(`[NativeModuleHelper] Rebuilding better-sqlite3 for Electron ${electronVersion} (ABI ${nodeModuleVersion})...`);
-
     try {
       await this.rebuildModule(extensionPath, electronVersion);
       await this.updateCache(cacheFile, electronVersion, nodeModuleVersion);
-      console.log(`[NativeModuleHelper] Successfully rebuilt better-sqlite3`);
     } catch (error) {
       throw new Error(`Failed to rebuild ${this.MODULE_NAME}: ${error}`);
     }
@@ -117,8 +112,7 @@ export class NativeModuleHelper {
       // Try to require it
       require(modulePath);
       return true;
-    } catch (error) {
-      console.log(`[NativeModuleHelper] Failed to load module:`, error);
+    } catch {
       return false;
     }
   }
@@ -140,10 +134,8 @@ export class NativeModuleHelper {
       electronVersion
     ];
 
-    console.log(`[NativeModuleHelper] Running: ${command} ${args.join(' ')}`);
-
     try {
-      const { stdout, stderr } = await execFileAsync(command, args, {
+      await execFileAsync(command, args, {
         cwd: extensionPath,
         env: {
           ...process.env,
@@ -155,15 +147,8 @@ export class NativeModuleHelper {
         timeout: 120000, // 2 minute timeout
         maxBuffer: 1024 * 1024 * 10 // 10MB buffer limit
       });
-
-      if (stdout) {
-        console.log(`[NativeModuleHelper] Rebuild output:`, stdout);
-      }
-      if (stderr) {
-        console.log(`[NativeModuleHelper] Rebuild stderr:`, stderr);
-      }
     } catch (error: any) {
-      console.error(`[NativeModuleHelper] Rebuild failed:`, error);
+      console.error('[NativeModuleHelper] Rebuild failed:', error);
       throw error;
     }
   }

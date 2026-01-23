@@ -52,8 +52,6 @@ let blindApprovalDetector: BlindApprovalDetector | null = null;
  * Extension activation
  */
 export async function activate(context: vscode.ExtensionContext) {
-  console.log('CodePause extension is activating...');
-
   try {
     // Initialize telemetry first (privacy-first, anonymous)
     telemetryService = new TelemetryService(context);
@@ -98,8 +96,6 @@ export async function activate(context: vscode.ExtensionContext) {
       // Show activation message via notification service
       notificationService?.showProgressNotification('CodePause is now tracking your AI usage');
     }
-
-    console.log('CodePause extension activated successfully');
   } catch (error) {
     console.error('Failed to activate CodePause:', error);
 
@@ -124,28 +120,18 @@ export async function activate(context: vscode.ExtensionContext) {
 function getWorkspacePath(): string | undefined {
   const workspaceFolders = vscode.workspace.workspaceFolders;
 
-  console.log('========================================');
-  console.log('[Extension] 🔍 DETECTING WORKSPACE');
-  console.log('[Extension] 📁 Workspace folders:', workspaceFolders?.length || 0);
-
   if (!workspaceFolders || workspaceFolders.length === 0) {
     // No workspace - single file mode
-    console.log('[Extension] ⚠️  No workspace detected (single file mode)');
-    console.log('========================================');
     return undefined;
   }
 
   if (workspaceFolders.length === 1) {
     // Single workspace (most common)
-    console.log('[Extension] 📂 Single workspace:', workspaceFolders[0].uri.fsPath);
-    console.log('========================================');
     return workspaceFolders[0].uri.fsPath;
   }
 
   // Multi-root workspace: use the first folder as primary
   // In the future, we could let users select which workspace to track
-  console.log('[CodePause] Multi-root workspace detected, using first folder:', workspaceFolders[0].uri.fsPath);
-  console.log('========================================');
   return workspaceFolders[0].uri.fsPath;
 }
 
@@ -153,8 +139,6 @@ function getWorkspacePath(): string | undefined {
  * Extension deactivation
  */
 export async function deactivate() {
-  console.log('CodePause extension is deactivating...');
-
   // Dispose telemetry (flush remaining events)
   if (telemetryService) {
     await telemetryService.dispose();
@@ -224,8 +208,6 @@ export async function deactivate() {
   configManager = null;
   thresholdManager = null;
   dashboardProvider = null;
-
-  console.log('CodePause extension deactivated');
 }
 
 /**
@@ -244,12 +226,6 @@ async function initializeStorage(_context: vscode.ExtensionContext): Promise<voi
 
   // Get current workspace path for project-specific database
   const workspacePath = getWorkspacePath();
-
-  if (workspacePath) {
-    console.log(`[CodePause] Using workspace-specific database for: ${workspacePath}`);
-  } else {
-    console.log('[CodePause] No workspace detected, using global database');
-  }
 
   // Create DatabaseManager with workspace-specific path
   databaseManager = new DatabaseManager(storagePath, workspacePath);
@@ -274,8 +250,8 @@ async function initializeTrackers(_context: vscode.ExtensionContext): Promise<vo
     throw new Error('Storage must be initialized before trackers');
   }
 
-  // Initialize metrics collector
-  metricsCollector = new MetricsCollector(metricsRepository, configManager);
+  // Initialize metrics collector with telemetry service
+  metricsCollector = new MetricsCollector(metricsRepository, configManager, telemetryService ?? undefined);
   await metricsCollector.initialize();
 
 }
@@ -305,7 +281,9 @@ async function initializeUI(context: vscode.ExtensionContext): Promise<void> {
     context.extensionUri,
     metricsRepository,
     configRepository,
-    thresholdManager
+    thresholdManager,
+    telemetryService ?? undefined, // Pass telemetry service for review event tracking
+    metricsCollector ?? undefined // Pass metrics collector to access FileReviewSessionTracker
   );
 
   // Register dashboard view
@@ -410,6 +388,14 @@ async function initializeAlerts(context: vscode.ExtensionContext): Promise<void>
         console.error('[XPSystem] Error showing XP gain:', error);
       }
     });
+
+    // AUTO-REFRESH FIX: Automatically refresh dashboard when events are processed
+    metricsCollector.onEvent(async () => {
+      // Refresh dashboard for all event types to keep UI in sync
+      if (dashboardProvider) {
+        await dashboardProvider.refresh();
+      }
+    });
   }
 
   // Function to check thresholds (can be called manually or periodically)
@@ -479,45 +465,38 @@ async function initializeAlerts(context: vscode.ExtensionContext): Promise<void>
   );
   context.subscriptions.push(checkThresholdsNow);
 
-  // Test notification command (for debugging notification visibility)
+  // Test notification command (for verifying notification visibility)
   const testNotification = vscode.commands.registerCommand(
     'codePause.testNotification',
     async () => {
-      console.log('[TEST] Showing test notification...');
-
-      // Test 1: Modal notification (impossible to miss)
-      const modalResult = await vscode.window.showInformationMessage(
-        '🔔 TEST NOTIFICATION (Modal)',
+      // Test 1: Modal notification
+      await vscode.window.showInformationMessage(
+        'TEST NOTIFICATION (Modal)',
         { modal: true },
         'I see this!',
         'Not visible'
       );
-      console.log('[TEST] Modal result:', modalResult);
 
-      // Test 2: Non-modal notification (what threshold alerts use)
-      const nonModalResult = await vscode.window.showInformationMessage(
-        '🔔 TEST NOTIFICATION (Non-Modal) - This should appear in top-right corner or notification center',
+      // Test 2: Non-modal notification
+      await vscode.window.showInformationMessage(
+        'TEST NOTIFICATION (Non-Modal) - This should appear in top-right corner or notification center',
         { modal: false },
         'I see this!',
         'Not visible'
       );
-      console.log('[TEST] Non-modal result:', nonModalResult);
 
-      // Test 3: Warning message (what threshold alerts might use)
-      const warningResult = await vscode.window.showWarningMessage(
-        '⚠️ TEST WARNING - Check if you can see this warning notification',
+      // Test 3: Warning message
+      await vscode.window.showWarningMessage(
+        'TEST WARNING - Check if you can see this warning notification',
         { modal: false },
         'Visible',
         'Not visible'
       );
-      console.log('[TEST] Warning result:', warningResult);
 
-      vscode.window.showInformationMessage('Test complete! Check console for results.');
+      vscode.window.showInformationMessage('Test complete!');
     }
   );
   context.subscriptions.push(testNotification);
-
-  console.log('Alert system initialized (real-time + periodic threshold checks)');
 }
 
 /**
@@ -531,7 +510,6 @@ async function initializeGamification(context: vscode.ExtensionContext): Promise
   // Check if gamification is enabled
   const config = await configRepository.getUserConfig();
   if (!config.enableGamification) {
-    console.log('Gamification is disabled');
     return;
   }
 
@@ -606,8 +584,6 @@ async function initializeGamification(context: vscode.ExtensionContext): Promise
   context.subscriptions.push({
     dispose: () => clearInterval(gamificationCheckInterval)
   });
-
-  console.log('Gamification initialized');
 }
 
 /**
@@ -638,8 +614,6 @@ async function initializeCustomization(context: vscode.ExtensionContext): Promis
       await statusBarManager!.refresh();
     });
   }
-
-  console.log('Customization initialized');
 }
 
 /**
@@ -1121,6 +1095,20 @@ function registerCommands(context: vscode.ExtensionContext): void {
         const globalDbPath = path.join(os.homedir(), '.codepause', 'global.db');
         if (fs.existsSync(globalDbPath)) {
           fs.unlinkSync(globalDbPath);
+        }
+
+        // CORRECT FIX: Clear baseline file when clearing all data
+        // This ensures stale baselines from previous tests don't interfere
+        // On reload, baselines will be reestablished from:
+        //   1. Open files → current line count
+        //   2. Git projects → git HEAD
+        //   3. Closed files (no git) → treated as new file (correct behavior)
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (workspaceFolder) {
+          const baselinesPath = path.join(workspaceFolder, '.vscode', 'codepause-baselines.json');
+          if (fs.existsSync(baselinesPath)) {
+            fs.unlinkSync(baselinesPath);
+          }
         }
 
         vscode.window.showInformationMessage(
