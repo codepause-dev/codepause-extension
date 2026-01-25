@@ -196,7 +196,8 @@ describe('MetricsRepository', () => {
       mockDb.markFileAsReviewed = jest.fn().mockResolvedValue(undefined);
 
       await metricsRepo.markFileAsReviewed('test.ts', 'copilot', '2024-01-01', 'mid');
-      expect(mockDb.markFileAsReviewed).toHaveBeenCalledWith('test.ts', 'copilot', '2024-01-01', 'mid', 'manual');
+      // Updated to include actualReviewTime parameter (6th param, undefined when not provided)
+      expect(mockDb.markFileAsReviewed).toHaveBeenCalledWith('test.ts', 'copilot', '2024-01-01', 'mid', 'manual', undefined);
     });
   });
 

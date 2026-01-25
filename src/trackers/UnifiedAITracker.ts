@@ -563,15 +563,12 @@ export class UnifiedAITracker extends BaseTracker {
   /**
    * Process file change for AI detection (agent mode)
    *
-   * Handles cumulative tracking for multiple AI updates before review:
-   * - Baseline: Set when file is first opened, stays constant until reviewed
-   * - Delta: Calculated as (current lines - baseline lines)
-   * - Supports both additions and deletions
-   *
-   * For files without baseline, attempts to get previous state from git.
+   * File modified while closed = AI agent mode (HIGH confidence)
+   * Uses git diff to get only the actual changed lines, not total file lines.
    */
   private async processFileChange(uri: vscode.Uri, filePath: string): Promise<void> {
     const fileName = filePath.split('/').pop();
+    this.log(`\n${'='.repeat(60)}`);
     this.log(`[PROCESS-CHANGE] Starting for: ${fileName}`);
 
     try {
@@ -579,169 +576,126 @@ export class UnifiedAITracker extends BaseTracker {
       const text = document.getText();
       const currentLineCount = this.countLines(text);
 
-      this.log(`[PROCESS-CHANGE] ${fileName}: currentLines=${currentLineCount}`);
+      this.log(`[PROCESS-CHANGE] currentLineCount=${currentLineCount}`);
 
       // Skip empty files
       if (!currentLineCount || currentLineCount === 0) {
-        this.log(`[PROCESS-CHANGE] SKIPPED - empty file: ${fileName}`);
+        this.log(`[PROCESS-CHANGE] SKIPPED - empty file`);
         return;
       }
 
-      let baselineLineCount = this.fileBaselines.get(filePath);
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      let linesAdded = 0;
+      let linesRemoved = 0;
 
-      // BUG #2 FIX: If no in-memory baseline, try to get from database
-      // This handles the case where extension was reloaded and baselines were lost
-      if (baselineLineCount === undefined) {
+      // Try to use git diff to get ACTUAL changed lines (not total file lines)
+      if (workspaceFolder) {
         try {
-          // Try to get baseline from file review status in database
-          const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-          if (workspaceFolder) {
-            // Check if file is already tracked (has previous line count)
-            const { execSync } = require('child_process');
-            const relativePath = filePath.replace(workspaceFolder + '/', '');
+          const { execSync } = require('child_process');
+          const relativePath = filePath.replace(workspaceFolder + '/', '');
 
-            // Get last committed version line count from git as baseline
-            try {
-              const gitResult = execSync(`git show HEAD:"${relativePath}" 2>/dev/null | wc -l`, {
-                cwd: workspaceFolder,
-                encoding: 'utf-8'
-              }).trim();
-
-              const gitLineCount = parseInt(gitResult, 10);
-              if (!isNaN(gitLineCount) && gitLineCount > 0) {
-                baselineLineCount = gitLineCount;
-                this.fileBaselines.set(filePath, gitLineCount);
-                this.savePersistedBaselines(); // BUG #2 FIX: Persist restored baseline
-                this.log(`[PROCESS-CHANGE] ${fileName}: Restored baseline from git: ${gitLineCount}`);
-              }
-            } catch {
-              // Git lookup failed - will continue without baseline
-            }
-          }
-        } catch {
-          // Error getting baseline - continue without
-        }
-      }
-
-      this.log(`[PROCESS-CHANGE] ${fileName}: baseline=${baselineLineCount ?? 'NONE'}`);
-
-      // Handle files without baseline (never opened or first modification)
-      if (baselineLineCount === undefined) {
-        let gitBaseline: number | null = null;
-
-        try {
-          const fileStat = await vscode.workspace.fs.stat(uri);
-          const fileAgeMs = Date.now() - fileStat.ctime;
-          // Use ctime (creation time), not mtime, to detect truly new files
-          const isNewFile = fileAgeMs < 30000;
-
-          if (isNewFile) {
-            // New file created by AI - count all lines as AI-generated
-            this.fileBaselines.set(filePath, currentLineCount);
-            this.cumulativeAILines.set(filePath, 0);
-            this.savePersistedBaselines(); // BUG #2 FIX: Persist new file baseline
-
-            const result = this.aiDetector.detectFromExternalFileChange(text, false, Date.now());
-            if (result.isAI) {
-              this.emitAIEventFromResult(result, document, currentLineCount, currentLineCount);
-            }
-            return;
-          }
-
-          // Existing file - try to get baseline from git (last committed version)
+          // Check if we're in a git repo and get diff
           try {
-            const { execSync } = require('child_process');
-            const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            execSync('git rev-parse --git-dir', { cwd: workspaceFolder, stdio: 'ignore' });
 
-            if (workspaceFolder) {
-              const relativePath = filePath.replace(workspaceFolder + '/', '');
-              const gitResult = execSync(`git show HEAD:"${relativePath}" 2>/dev/null | wc -l`, {
-                cwd: workspaceFolder,
-                encoding: 'utf-8'
-              }).trim();
+            // Use git diff to get only the actual added/removed lines
+            const diffResult = execSync(`git diff HEAD --numstat -- "${relativePath}" 2>/dev/null`, {
+              cwd: workspaceFolder,
+              encoding: 'utf-8'
+            }).trim();
 
-              const previousLineCount = parseInt(gitResult, 10);
-              if (!isNaN(previousLineCount) && previousLineCount > 0) {
-                gitBaseline = previousLineCount;
+            if (diffResult) {
+              const [added, removed] = diffResult.split(/\s+/);
+              linesAdded = parseInt(added, 10) || 0;
+              linesRemoved = parseInt(removed, 10) || 0;
+              this.log(`[PROCESS-CHANGE] Git diff: +${linesAdded} -${linesRemoved}`);
+            } else {
+              // Check if file is tracked (no diff means no changes to committed version)
+              try {
+                execSync(`git ls-files --error-unmatch "${relativePath}"`, {
+                  cwd: workspaceFolder,
+                  stdio: 'ignore'
+                });
+                // File is tracked but no diff = no changes since last commit
+                this.log(`[PROCESS-CHANGE] File tracked but no diff, using baseline method`);
+                linesAdded = 0;
+                linesRemoved = 0;
+              } catch {
+                // New untracked file - use current line count
+                linesAdded = currentLineCount;
+                this.log(`[PROCESS-CHANGE] New file: ${linesAdded} lines`);
               }
             }
           } catch {
-            // Git lookup failed - will use current as baseline
+            // Not a git repo - baseline method will be used as fallback
+            this.log(`[PROCESS-CHANGE] Not a git repo, will use baseline tracking`);
           }
-
-          if (gitBaseline !== null) {
-            // Use git baseline for delta calculation
-            this.fileBaselines.set(filePath, gitBaseline);
-            this.cumulativeAILines.set(filePath, 0);
-            this.savePersistedBaselines(); // BUG #2 FIX: Persist git baseline
-          } else {
-            // No baseline available - set current and skip this change
-            this.fileBaselines.set(filePath, currentLineCount);
-            this.cumulativeAILines.set(filePath, 0);
-            this.savePersistedBaselines(); // BUG #2 FIX: Persist baseline
-            return;
-          }
-        } catch {
-          // File stat failed - set current as baseline
-          this.fileBaselines.set(filePath, currentLineCount);
-          this.cumulativeAILines.set(filePath, 0);
-          this.savePersistedBaselines(); // BUG #2 FIX: Persist baseline
-          return;
+        } catch (error) {
+          this.log(`[PROCESS-CHANGE] Git diff error: ${error}`);
         }
       }
 
-      // Get effective baseline (may have been set from git above)
-      const effectiveBaseline = this.fileBaselines.get(filePath) ?? baselineLineCount;
-      if (effectiveBaseline === undefined) {
+      // Fallback: Use baseline tracking if git diff didn't work
+      // This ensures AI detection works even in non-git projects
+      if (linesAdded === 0 && linesRemoved === 0) {
+        const baselineLineCount = this.fileBaselines.get(filePath);
+
+        if (baselineLineCount === undefined) {
+          // First time seeing this file - establish baseline
+          // Don't emit event for initial file load (not AI-generated)
+          this.fileBaselines.set(filePath, currentLineCount);
+          this.cumulativeAILines.set(filePath, 0);
+          this.savePersistedBaselines();
+          this.log(`[PROCESS-CHANGE] Establishing baseline: ${currentLineCount} lines (no event emitted)`);
+          return;
+        }
+
+        // Calculate actual changes from baseline
+        // Positive delta = lines added, negative delta = lines removed
+        const deltaFromBaseline = currentLineCount - baselineLineCount;
+
+        if (deltaFromBaseline > 0) {
+          linesAdded = deltaFromBaseline;
+          linesRemoved = 0;
+        } else if (deltaFromBaseline < 0) {
+          linesAdded = 0;
+          linesRemoved = Math.abs(deltaFromBaseline);
+        } else {
+          // File size unchanged - no actual modifications
+          this.log(`[PROCESS-CHANGE] No changes detected (delta=0), skipping`);
+          return;
+        }
+
+        this.log(`[PROCESS-CHANGE] Baseline delta: +${linesAdded} -${linesRemoved} (was ${baselineLineCount}, now ${currentLineCount})`);
+      }
+
+      // Skip if no actual changes
+      if (linesAdded === 0 && linesRemoved === 0) {
+        this.log(`[PROCESS-CHANGE] No changes detected, SKIPPING`);
         return;
       }
 
-      // Calculate delta and update cumulative tracking
-      const deltaFromBaseline = currentLineCount - effectiveBaseline;
-      const previousCumulative = this.cumulativeAILines.get(filePath) || 0;
-      const newLinesThisUpdate = Math.max(0, deltaFromBaseline - previousCumulative);
-      const newCumulative = previousCumulative + newLinesThisUpdate;
-      this.cumulativeAILines.set(filePath, newCumulative);
+      // Update baseline for next change
+      this.fileBaselines.set(filePath, currentLineCount);
+      this.savePersistedBaselines();
 
-      // Calculate separate metrics for additions and removals
-      const metrics = this.calculateLineMetrics(deltaFromBaseline);
+      const linesChanged = linesAdded + linesRemoved;
 
-      // Emit event if there are any changes
-      this.log(`[PROCESS-CHANGE] ${fileName}: delta=${deltaFromBaseline}, linesChanged=${metrics.linesChanged}`);
+      // File modified while closed = AI agent mode (HIGH confidence)
+      // This is the original working approach
+      const result = this.aiDetector.detectFromExternalFileChange(
+        text,
+        false, // wasFileOpen = false
+        Date.now()
+      );
 
-      if (metrics.linesChanged > 0) {
-        const result = this.aiDetector.detectFromExternalFileChange(text, false, Date.now());
-
-        this.log(`[PROCESS-CHANGE] ${fileName}: isAI=${result.isAI}, method=${result.method}`);
-
-        if (result.isAI) {
-          // BUG #2 FIX: Use metrics.linesAdded directly instead of newLinesThisUpdate
-          // The cumulative tracking was preventing correct emission of deltas
-          if (metrics.linesAdded > 0 && metrics.linesRemoved === 0) {
-            // Pure addition - use metrics.linesAdded (the actual delta)
-            this.log(`[PROCESS-CHANGE] ${fileName}: EMITTING pure addition +${metrics.linesAdded}`);
-            this.emitAIEventFromResult(result, document, metrics.linesAdded, metrics.linesChanged, 0);
-          } else if (metrics.linesRemoved > 0 && metrics.linesAdded === 0) {
-            // Pure deletion
-            this.log(`[PROCESS-CHANGE] ${fileName}: EMITTING pure deletion -${metrics.linesRemoved}`);
-            this.emitAIEventFromResult(result, document, 0, metrics.linesChanged, metrics.linesRemoved);
-          } else if (metrics.linesAdded > 0 && metrics.linesRemoved > 0) {
-            // Mixed: both additions and removals
-            this.log(`[PROCESS-CHANGE] ${fileName}: EMITTING mixed +${metrics.linesAdded} -${metrics.linesRemoved}`);
-            this.emitAIEventFromResult(result, document, metrics.linesAdded, metrics.linesChanged, metrics.linesRemoved);
-          }
-
-          // BUG #2 FIX: Update baseline after emitting event so next change calculates delta correctly
-          this.log(`[PROCESS-CHANGE] ${fileName}: Updating baseline from ${effectiveBaseline} to ${currentLineCount}`);
-          this.fileBaselines.set(filePath, currentLineCount);
-          this.savePersistedBaselines();
-        } else {
-          this.log(`[PROCESS-CHANGE] ${fileName}: NOT detected as AI, skipping event`);
-        }
-      } else {
-        this.log(`[PROCESS-CHANGE] ${fileName}: No changes detected, skipping`);
+      if (result.isAI) {
+        this.log(`[PROCESS-CHANGE] ✓ Agent mode detected: +${linesAdded} -${linesRemoved}`);
+        this.emitAIEventFromResult(result, document, linesAdded, linesChanged, linesRemoved);
       }
+      this.log(`${'='.repeat(60)}\n`);
     } catch (error) {
+      this.log(`[PROCESS-CHANGE] ERROR: ${error}`);
       this.logError('Failed to process external file change', error);
     }
   }
@@ -752,20 +706,6 @@ export class UnifiedAITracker extends BaseTracker {
   private async handleFileCreation(uri: vscode.Uri): Promise<void> {
     // New file created = likely AI (especially if not in active editor)
     await this.handleFileChange(uri);
-  }
-
-  /**
-   * Calculate line metrics from delta
-   * Converts delta into separate added/removed/changed counts
-   */
-  private calculateLineMetrics(delta: number): { linesAdded: number; linesRemoved: number; linesChanged: number } {
-    const linesAdded = Math.max(0, delta);
-    const linesRemoved = Math.max(0, -delta);
-    const linesChanged = linesAdded + linesRemoved;
-
-    this.log(`[LINE-METRICS] delta=${delta} → added=${linesAdded}, removed=${linesRemoved}, changed=${linesChanged}`);
-
-    return { linesAdded, linesRemoved, linesChanged };
   }
 
   /**
@@ -851,6 +791,7 @@ export class UnifiedAITracker extends BaseTracker {
     const linesChanged = totalChanges !== undefined ? totalChanges : linesOfCode;
     const removedLines = linesRemoved !== undefined ? linesRemoved : 0;
 
+
     if (linesOfCode === 0 && linesChanged === 0 && removedLines === 0) {
       this.log(`  Skipping empty event (0 lines)`);
       return;
@@ -858,6 +799,10 @@ export class UnifiedAITracker extends BaseTracker {
 
     // BUG FIX #3: Set isAgentMode flag for external-file-change detection
     const isAgentMode = result.method === 'external-file-change';
+    // FIX: Set fileWasOpen based on detection method
+    // external-file-change → file was closed (Agent Mode)
+    // large-paste → file was likely open (Agent Mode for Gravity, etc.)
+    const fileWasOpen = result.method === 'large-paste';
 
     this.emitEvent({
       eventType: EventType.CodeGenerated,
@@ -871,13 +816,13 @@ export class UnifiedAITracker extends BaseTracker {
       language: document.languageId,
       detectionMethod: result.method,
       confidence: result.confidence,
-      isAgentMode: isAgentMode, // BUG FIX #3
-      fileWasOpen: false, // External file change means file was closed
+      isAgentMode: isAgentMode || result.method === 'large-paste', // Also count large-paste as Agent Mode
+      fileWasOpen: fileWasOpen,
       metadata: {
         source: result.metadata.source,
         detectionMethod: result.method,
         confidence: result.confidence,
-        isAgentMode: isAgentMode, // BUG FIX #3
+        isAgentMode: isAgentMode || result.method === 'large-paste',
         isAgentGenerated: true  // FIX: Mark as AI-generated for getCodingModes
       }
     });

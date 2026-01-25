@@ -11,6 +11,7 @@ vsc-extension-quickstart.md
 **/.DS_Store
 **/MindfulCode_Implementation_Plan.md
 
-# Exclude most of node_modules but keep node-sqlite3-wasm (needed for WASM files)
+# Exclude most of node_modules but include required dependencies
 **/node_modules/**
-!node_modules/node-sqlite3-wasm/**
+!node_modules/sql.js/**
+!node_modules/date-fns/**

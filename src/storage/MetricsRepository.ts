@@ -663,9 +663,10 @@ export class MetricsRepository {
   /**
    * Manually mark a file as reviewed
    * @param reviewMethod - 'manual' (user clicked button) or 'automatic' (system detected proper review)
+   * @param actualReviewTime - Actual time spent reviewing (from FileReviewSessionTracker), if not provided calculates expected time
    */
-  async markFileAsReviewed(filePath: string, tool: string, date: string, developerLevel?: string, reviewMethod: 'manual' | 'automatic' = 'manual'): Promise<void> {
-    return await this.db.markFileAsReviewed(filePath, tool, date, developerLevel, reviewMethod);
+  async markFileAsReviewed(filePath: string, tool: string, date: string, developerLevel?: string, reviewMethod: 'manual' | 'automatic' = 'manual', actualReviewTime?: number): Promise<void> {
+    return await this.db.markFileAsReviewed(filePath, tool, date, developerLevel, reviewMethod, actualReviewTime);
   }
 
   /**

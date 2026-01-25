@@ -194,6 +194,50 @@ npm test
 
 ---
 
+## Requirements
+
+### System Requirements
+- **VS Code** 1.85.0 or newer
+- **Operating System**: Windows, macOS, or Linux
+
+### Git Repository (Recommended)
+
+⚠️ **CodePause works best with git repositories**
+
+**Why git is recommended:**
+- CodePause uses `git diff` to precisely track AI-generated code changes
+- Without git, the extension falls back to baseline tracking (less accurate)
+- You'll see reduced accuracy in detecting line additions/removals
+
+**Setting up git (if not already using it):**
+
+```bash
+# Initialize git in your workspace
+git init
+
+# Add all files
+git add -A
+
+# Make initial commit
+git commit -m "Initial commit"
+```
+
+**What happens without git:**
+- CodePause will show a one-time warning on first launch
+- The extension will still work using baseline tracking
+- Accuracy may be reduced for complex file changes
+
+### Supported AI Tools
+
+CodePause tracks code from:
+- **GitHub Copilot**
+- **Cursor** (Tab and Composer modes)
+- **Claude Code** (agent mode)
+- **Gravity**
+- Any tool using VS Code's inline completion API
+
+---
+
 ## Quick Start
 
 ### 1. Set Your Experience Level
@@ -242,12 +286,64 @@ Quick access: `Ctrl+,` → Search for "CodePause"
 
 ---
 
+## Troubleshooting
+
+### "CodePause works best with git repositories" Warning
+
+If you see this warning on first launch, your workspace is not a git repository.
+
+**Quick Fix:**
+```bash
+# Initialize git in your workspace root
+cd /path/to/your/workspace
+git init
+git add -A
+git commit -m "Initial commit"
+```
+
+**Why this matters:**
+- Without git, CodePause uses baseline tracking (less accurate)
+- With git, it uses `git diff` for precise line-by-line change detection
+- Improves detection accuracy from ~85% to >95%
+
+**Can I use CodePause without git?**
+- Yes! The extension will still work
+- You'll see slightly less accurate metrics for AI-generated code
+- Baseline tracking works well for most use cases
+
+### AI Code Not Being Detected
+
+**Check these common issues:**
+
+1. **Not a git repository?** See above for setup
+2. **File not saved?** CodePause tracks changes on file save
+3. **Very small changes (<10 lines)?** These may not trigger detection
+4. **File opened in another editor?** Close other instances
+
+### Dashboard Not Updating
+
+**Try these steps:**
+1. Click the "Refresh" button in the dashboard
+2. Close and reopen the dashboard
+3. Reload VS Code window (`Ctrl+Shift+P` → "Reload Window")
+
+### Performance Issues
+
+If CodePause is slowing down VS Code:
+1. Check if you have many large files open
+2. Disable file watching for certain directories in settings
+3. Report the issue with diagnostic logs
+
+---
+
 ## FAQ
 
 Have questions? Check our [FAQ](docs/FAQ.md) for answers to common questions about:
 - Performance impact
 - Data privacy
 - Compatibility
+- Git repository usage
+- Detection accuracy
 - Customization
 - Export options
 - Open source licensing

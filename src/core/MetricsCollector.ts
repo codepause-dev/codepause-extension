@@ -91,13 +91,15 @@ export class MetricsCollector implements IMetricsCollector {
         const today = new Date().toISOString().split('T')[0];
         const config = this.configManager.getConfig();
 
-        // Call markFileAsReviewed with 'automatic' review method
+        // CRITICAL FIX: Pass actual review time from session tracking
+        // This ensures the database stores real time spent, not calculated expected time
         await this.metricsRepo.markFileAsReviewed(
           session.filePath,
           session.tool,
           today,
           config.experienceLevel,
-          'automatic' // System detected proper review via file viewing, scrolling, editing
+          'automatic', // System detected proper review via file viewing, scrolling, editing
+          session.totalTimeInFocus // ACTUAL time spent reviewing (not calculated)
         );
 
         // ========== CRITICAL FIX: Update in-memory cache ==========

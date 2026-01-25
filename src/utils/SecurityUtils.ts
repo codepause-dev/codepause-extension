@@ -121,3 +121,25 @@ export function isValidEnum<T>(value: unknown, allowedValues: T[]): value is T {
 export function isValidImportFileSize(fileSize: number, maxSize: number = 10485760): boolean {
   return fileSize > 0 && fileSize <= maxSize;
 }
+
+/**
+ * Checks if a directory is a git repository
+ * @param workspacePath - Path to workspace folder
+ * @returns true if directory is a git repository
+ */
+export function isGitRepository(workspacePath: string): boolean {
+  if (!workspacePath) {
+    return false;
+  }
+
+  try {
+    const { execSync } = require('child_process');
+    execSync('git rev-parse --git-dir', {
+      cwd: workspacePath,
+      stdio: 'ignore'
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}

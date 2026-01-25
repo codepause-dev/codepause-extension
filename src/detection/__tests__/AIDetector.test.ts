@@ -29,11 +29,27 @@ describe('AIDetector', () => {
   });
 
   describe('Method 2: Large Paste Detection', () => {
-    it('should detect large paste (>100 chars) with code structure as AI', () => {
-      const largeCode = `function calculateSum(a, b) {
-        const result = a + b;
-        console.log('Result:', result);
-        return result;
+    it('should detect large paste (>500 chars) with code structure as AI', () => {
+      // Generate a code block >500 chars
+      const largeCode = `function calculateComplexOperation(a, b, c, d) {
+        const firstStep = a + b;
+        const secondStep = c * d;
+        const intermediateResult = firstStep - secondStep;
+
+        if (intermediateResult > 0) {
+          console.log('Positive result:', intermediateResult);
+          return intermediateResult * 2;
+        } else if (intermediateResult < 0) {
+          console.log('Negative result:', intermediateResult);
+          return Math.abs(intermediateResult);
+        } else {
+          console.log('Zero result');
+          return 0;
+        }
+      }
+
+      function helperFunction(x) {
+        return x * x + 2 * x + 1;
       }`;
 
       const event: CodeChangeEvent = {
@@ -49,7 +65,34 @@ describe('AIDetector', () => {
       expect(result.isAI).toBe(true);
       expect(result.confidence).toBe('high');
       expect(result.method).toBe(AIDetectionMethod.LargePaste);
-      expect(result.metadata.charactersCount).toBeGreaterThan(100);
+      expect(result.metadata.charactersCount).toBeGreaterThan(500);
+    });
+
+    it('should NOT detect medium paste (100-499 chars) as AI', () => {
+      // Generate a paste between 100-499 chars (could be manual snippet)
+      const mediumCode = `function calculateSum(a, b) {
+        const result = a + b;
+        console.log('Result:', result);
+        return result;
+      }
+
+      const x = 10;
+      const y = 20;`;
+
+      const event: CodeChangeEvent = {
+        text: mediumCode,
+        rangeLength: 0,
+        timestamp: Date.now(),
+        documentUri: 'file:///test.ts',
+        isActiveEditor: true
+      };
+
+      const result = detector.detectFromLargePaste(event);
+
+      // Should NOT detect as AI (below 500 char threshold)
+      expect(result.isAI).toBe(false);
+      expect(result.confidence).toBe('low');
+      expect(result.metadata.charactersCount).toBeLessThan(500);
     });
 
     it('should NOT detect small paste (<100 chars) as AI', () => {
@@ -68,7 +111,8 @@ describe('AIDetector', () => {
     });
 
     it('should NOT detect large text without code structure as AI', () => {
-      const largeText = 'This is a very long comment that exceeds 100 characters but does not contain any code structure patterns at all just plain text.';
+      // Generate >500 chars of plain text
+      const largeText = 'This is a very long comment that exceeds 500 characters but does not contain any code structure patterns at all just plain text. '.repeat(5);
 
       const event: CodeChangeEvent = {
         text: largeText,
@@ -81,6 +125,7 @@ describe('AIDetector', () => {
       const result = detector.detectFromLargePaste(event);
 
       expect(result.isAI).toBe(false); // No code structure
+      expect(result.metadata.charactersCount).toBeGreaterThan(500);
     });
 
     it('should detect code structure correctly', () => {
@@ -96,12 +141,12 @@ describe('AIDetector', () => {
 
       const result = detector.detectFromLargePaste(event);
 
-      expect(result.isAI).toBe(false); // <100 chars, but has structure
+      expect(result.isAI).toBe(false); // <500 chars, even with structure
     });
   });
 
   describe('Method 3: External File Change Detection', () => {
-    it('should detect closed file modification as AI with HIGH confidence', () => {
+    it('should detect external file modification as AI with HIGH confidence', () => {
       const text = 'function test() { return 42; }';
       const wasFileOpen = false;
       const timestamp = Date.now();
@@ -114,15 +159,16 @@ describe('AIDetector', () => {
       expect(result.metadata.source).toBe('external-file-change');
     });
 
-    it('should NOT detect open file modification as AI', () => {
+    it('should always detect external file changes as AI (agent mode)', () => {
       const text = 'function test() { return 42; }';
-      const wasFileOpen = true;
+      const wasFileOpen = true; // Even if file was open
       const timestamp = Date.now();
 
       const result = detector.detectFromExternalFileChange(text, wasFileOpen, timestamp);
 
-      expect(result.isAI).toBe(false);
-      expect(result.confidence).toBe('low');
+      // Changed: Now always returns HIGH confidence for external changes (agent mode detection)
+      expect(result.isAI).toBe(true);
+      expect(result.confidence).toBe('high');
     });
   });
 
@@ -247,23 +293,44 @@ describe('AIDetector', () => {
 
   describe('Unified detection (all methods combined)', () => {
     it('should prioritize HIGH confidence over MEDIUM/LOW', () => {
+      // Create a large code block to trigger HIGH confidence large paste detection
+      const largeCode = `function calculateComplexOperation(a, b, c, d) {
+        const firstStep = a + b;
+        const secondStep = c * d;
+        const intermediateResult = firstStep - secondStep;
+
+        if (intermediateResult > 0) {
+          console.log('Positive result:', intermediateResult);
+          return intermediateResult * 2;
+        } else if (intermediateResult < 0) {
+          console.log('Negative result:', intermediateResult);
+          return Math.abs(intermediateResult);
+        } else {
+          console.log('Zero result');
+          return 0;
+        }
+      }
+
+      function helperFunction(x) {
+        return x * x + 2 * x + 1;
+      }`;
+
       const event: CodeChangeEvent = {
-        text: 'function test() { return 42; }',
+        text: largeCode,
         rangeLength: 0,
         timestamp: Date.now(),
         documentUri: 'file:///test.ts',
         isActiveEditor: true
       };
 
-      // Provide context that triggers HIGH confidence method
+      // Large paste (>500 chars with code structure) should give HIGH confidence
       const result = detector.detect(event, {
-        wasFileOpen: false, // HIGH confidence: external file change
         isInlineCompletion: false
       });
 
       expect(result.isAI).toBe(true);
       expect(result.confidence).toBe('high');
-      expect(result.method).toBe(AIDetectionMethod.ExternalFileChange);
+      expect(result.method).toBe(AIDetectionMethod.LargePaste);
     });
 
     it('should use inline completion when available', () => {
@@ -339,10 +406,10 @@ describe('AIDetector', () => {
       let falseNegatives = 0;
       const totalEvents = 1000;
 
-      // Simulate 1000 large paste events (>100 chars with code)
+      // Simulate 1000 large paste events (>500 chars with code)
       for (let i = 0; i < totalEvents; i++) {
         const event: CodeChangeEvent = {
-          text: `function test${i}() {\n  const x = ${i};\n  return x * 2;\n}`.repeat(2), // >100 chars
+          text: `function test${i}() {\n  const x = ${i};\n  return x * 2;\n}`.repeat(15), // 15 repeats ensures >500 chars
           rangeLength: 0,
           timestamp: Date.now() + i,
           documentUri: 'file:///test.ts',
@@ -356,7 +423,7 @@ describe('AIDetector', () => {
         }
       }
 
-      // Should catch all large pastes
+      // Should catch all large pastes with zero false negatives
       expect(falseNegatives).toBe(0);
     });
 

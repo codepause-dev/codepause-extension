@@ -56,7 +56,7 @@ function calculateDynamicThresholds(
   const lightReviewTime = Math.max(5000, linesOfCode * baseSpeed.msPerLine);
   const thoroughReviewTime = lightReviewTime * 6;
 
-  return {
+  const config: ScoringConfig = {
     lightReviewTime,
     thoroughReviewTime,
     scrollBonus: 10,
@@ -65,6 +65,10 @@ function calculateDynamicThresholds(
     editBonus: 20,
     reviewedThreshold: baseSpeed.baseThreshold
   };
+
+  // DEBUG: Log the calculated thresholds
+
+  return config;
 }
 
 /**
@@ -238,6 +242,10 @@ export class FileReviewSessionTracker {
     // Check if file was generated within grace period
     const now = Date.now();
 
+    // Check if this file is currently open in the editor
+    const activeEditor = vscode.window.activeTextEditor;
+    const isOpen = activeEditor && this.getFilePathFromUri(activeEditor.document.uri) === filePath;
+
     const session: FileReviewSession = {
       filePath,
       tool,
@@ -255,6 +263,19 @@ export class FileReviewSessionTracker {
     };
 
     this.activeSessions.set(filePath, session);
+
+    // CRITICAL FIX: DON'T initialize time tracking immediately!
+    // Only track time when user ACTIVELY interacts with the file (scroll, cursor, edit)
+    // This prevents false positives where file is open but user isn't looking at it
+    // Time tracking will start on first user interaction (scroll/cursor/edit)
+    if (isOpen) {
+      // Mark that file is open, but DON'T start timer yet
+      session.firstOpenedAt = now;
+      session.lastOpenedAt = now;
+    }
+
+    // File is now being tracked for review
+    // User will be notified via dashboard and status bar
   }
 
   /**
@@ -331,17 +352,22 @@ export class FileReviewSessionTracker {
     if (session) {
       // Skip tracking if file is already reviewed
       if (session.wasReviewed) {
+        // CRITICAL FIX: Don't log spam - just return silently
         return;
       }
 
-      // CRITICAL FIX: Update time in focus BEFORE incrementing scroll count
-      // This ensures scrolling time is counted toward review time
-      if (this.currentActiveFile === filePath && this.sessionStartTime > 0) {
-        const now = Date.now();
-        const timeInFocus = now - this.sessionStartTime;
-        session.totalTimeInFocus += timeInFocus;
-        this.sessionStartTime = now; // Reset timer
+      // CRITICAL FIX: Start timer on FIRST interaction (scroll)
+      // This ensures time is only tracked when user is actively engaged
+      if (this.currentActiveFile !== filePath || this.sessionStartTime === 0) {
+        this.currentActiveFile = filePath;
+        this.sessionStartTime = Date.now();
       }
+
+      // Update time in focus
+      const now = Date.now();
+      const timeInFocus = now - this.sessionStartTime;
+      session.totalTimeInFocus += timeInFocus;
+      this.sessionStartTime = now; // Reset timer
 
       session.scrollEventCount++;
       this.updateReviewScore(session);
@@ -365,13 +391,17 @@ export class FileReviewSessionTracker {
         return;
       }
 
-      // CRITICAL FIX: Update time in focus on cursor movement
-      if (this.currentActiveFile === filePath && this.sessionStartTime > 0) {
-        const now = Date.now();
-        const timeInFocus = now - this.sessionStartTime;
-        session.totalTimeInFocus += timeInFocus;
-        this.sessionStartTime = now; // Reset timer
+      // CRITICAL FIX: Start timer on FIRST interaction (cursor movement)
+      if (this.currentActiveFile !== filePath || this.sessionStartTime === 0) {
+        this.currentActiveFile = filePath;
+        this.sessionStartTime = Date.now();
       }
+
+      // Update time in focus
+      const now = Date.now();
+      const timeInFocus = now - this.sessionStartTime;
+      session.totalTimeInFocus += timeInFocus;
+      this.sessionStartTime = now; // Reset timer
 
       session.cursorMovementCount++;
       this.updateReviewScore(session);
@@ -395,13 +425,17 @@ export class FileReviewSessionTracker {
         return;
       }
 
-      // CRITICAL FIX: Update time in focus on edits
-      if (this.currentActiveFile === filePath && this.sessionStartTime > 0) {
-        const now = Date.now();
-        const timeInFocus = now - this.sessionStartTime;
-        session.totalTimeInFocus += timeInFocus;
-        this.sessionStartTime = now; // Reset timer
+      // CRITICAL FIX: Start timer on FIRST interaction (edit)
+      if (this.currentActiveFile !== filePath || this.sessionStartTime === 0) {
+        this.currentActiveFile = filePath;
+        this.sessionStartTime = Date.now();
       }
+
+      // Update time in focus
+      const now = Date.now();
+      const timeInFocus = now - this.sessionStartTime;
+      session.totalTimeInFocus += timeInFocus;
+      this.sessionStartTime = now; // Reset timer
 
       // CRITICAL FIX: Only count SMALL edits as manual review edits
       // Large pastes (>300 chars) are likely AI-generated and shouldn't count as "review"
@@ -459,6 +493,7 @@ export class FileReviewSessionTracker {
                                     session.cursorMovementCount >= MIN_CURSOR_MOVEMENTS ||
                                     session.editsMade;
 
+
     // Factor 1: Time in focus (thresholds scale with file size)
     // ONLY count time if there are active interactions (scrolling, cursor movement, or edits)
     if (hasActiveInteractions) {
@@ -468,25 +503,25 @@ export class FileReviewSessionTracker {
         score += 50; // Light review
       } else {
         // Proportional score for less time
-        score += Math.min(
+        const proportionalScore = Math.min(
           (session.totalTimeInFocus / customScoring.lightReviewTime) * 30,
           30
         );
+        score += proportionalScore;
       }
     } else {
       // No active interactions - passive file opening doesn't count
-      // User just has the file open but isn't actually reviewing it
-      // Give 0 points for time to prevent accidental auto-review
-      score += 0;
     }
 
     // Factor 2: Scroll events (engaged reading)
     const scrollBonus = Math.floor(session.scrollEventCount / 3) * customScoring.scrollBonus;
-    score += Math.min(scrollBonus, customScoring.scrollBonus * 2); // Cap at 20
+    const cappedScrollBonus = Math.min(scrollBonus, customScoring.scrollBonus * 2);
+    score += cappedScrollBonus;
 
     // Factor 3: Cursor movements (navigation)
     const cursorBonus = Math.floor(session.cursorMovementCount / 5) * customScoring.cursorBonus;
-    score += Math.min(cursorBonus, customScoring.cursorBonus); // Cap at 10
+    const cappedCursorBonus = Math.min(cursorBonus, customScoring.cursorBonus);
+    score += cappedCursorBonus;
 
     // Factor 4: Edits made (highest engagement)
     if (session.editsMade) {
@@ -511,7 +546,9 @@ export class FileReviewSessionTracker {
     }
 
     // Mark as reviewed if score exceeds threshold (threshold varies by developer level)
-    if (score >= customScoring.reviewedThreshold) {
+    const meetsThreshold = score >= customScoring.reviewedThreshold;
+
+    if (meetsThreshold) {
       session.wasReviewed = true;
     }
 
@@ -521,6 +558,7 @@ export class FileReviewSessionTracker {
         this.onFileReviewed(session);
       }
     }
+
   }
 
   /**

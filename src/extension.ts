@@ -25,6 +25,7 @@ import { SettingsProvider } from './ui/SettingsProvider';
 import { AlertEngine } from './alerts/AlertEngine';
 import { BlindApprovalDetector } from './core/BlindApprovalDetector';
 import { EventType, DeveloperLevel } from './types';
+import { isGitRepository } from './utils/SecurityUtils';
 
 // Extension state
 let databaseManager: DatabaseManager | null = null;
@@ -63,6 +64,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Initialize storage
     await initializeStorage(context);
+
+    // Check if workspace is a git repository
+    await checkGitRepository(context);
 
     // Register commands
     registerCommands(context);
@@ -245,6 +249,43 @@ async function initializeStorage(_context: vscode.ExtensionContext): Promise<voi
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
+/**
+ * Check if workspace is a git repository and show warning if not
+ */
+async function checkGitRepository(_context: vscode.ExtensionContext): Promise<void> {
+  const workspacePath = getWorkspacePath();
+
+  if (!workspacePath) {
+    return; // No workspace open, skip check
+  }
+
+  const isGitRepo = isGitRepository(workspacePath);
+
+  if (!isGitRepo) {
+    // Show warning that git repository is recommended
+    const action = await vscode.window.showWarningMessage(
+      'CodePause works best with git repositories. AI detection accuracy may be reduced without git.',
+      'Initialize Git',
+      'Learn More',
+      'Dismiss'
+    );
+
+    if (action === 'Initialize Git') {
+      // Open terminal and suggest git init command
+      const terminal = vscode.window.createTerminal('CodePause Git Setup');
+      terminal.show();
+      terminal.sendText('# Initialize git repository for better AI tracking');
+      terminal.sendText('git init');
+      terminal.sendText('git add -A');
+      terminal.sendText('git commit -m "Initial commit"');
+    } else if (action === 'Learn More') {
+      vscode.env.openExternal(
+        vscode.Uri.parse('https://github.com/codepause/codepause-extension#git-repository-requirement')
+      );
+    }
+  }
+}
+
 async function initializeTrackers(_context: vscode.ExtensionContext): Promise<void> {
   if (!metricsRepository || !configManager) {
     throw new Error('Storage must be initialized before trackers');
@@ -437,6 +478,32 @@ async function initializeAlerts(context: vscode.ExtensionContext): Promise<void>
             await notificationService!.showAlert(alert);
             await alertEngine.recordAlertShown(alert);
             lastThresholdCheckTime = now;
+          }
+        }
+      }
+
+      // Check for review reminders - unreviewed AI-generated files
+      const unreviewedFiles = await metricsRepository.getUnreviewedFiles(today);
+      if (unreviewedFiles && unreviewedFiles.length > 0) {
+        const totalLines = unreviewedFiles.reduce((sum, f) => sum + (f.linesGenerated || 0), 0);
+        const avgScore = unreviewedFiles.reduce((sum, f) => sum + (f.reviewScore || 0), 0) / unreviewedFiles.length;
+
+        const shouldShowReminder = await alertEngine.shouldShowReviewReminder(
+          unreviewedFiles.length,
+          totalLines,
+          avgScore
+        );
+
+        if (shouldShowReminder) {
+          const alert = alertEngine.createReviewReminderAlert(
+            unreviewedFiles.length,
+            totalLines,
+            unreviewedFiles.map(f => f.filePath)
+          );
+
+          if (alert) {
+            await notificationService!.showAlert(alert);
+            await alertEngine.recordAlertShown(alert);
           }
         }
       }
@@ -784,14 +851,14 @@ function registerCommands(context: vscode.ExtensionContext): void {
         // Check snooze status
         const snoozeState = await configRepository.getSnoozeState();
         const isSnoozed = await configRepository.isSnoozed();
-        
+
         // Check rate limits for each alert type
         const alertTypes = [
           { type: 'GentleNudge', limit: 5 * 60 * 1000 },
           { type: 'EducationalMoment', limit: 30 * 60 * 1000 },
           { type: 'StreakWarning', limit: 10 * 60 * 1000 }
         ];
-        
+
         const rateLimitStatus = await Promise.all(
           alertTypes.map(async ({ type, limit }) => {
             const history = await configRepository!.getAlertHistory(type as any);
@@ -801,21 +868,21 @@ function registerCommands(context: vscode.ExtensionContext): void {
             const timeSince = Date.now() - history.lastShown;
             const canShow = timeSince >= limit;
             const minutesAgo = Math.floor(timeSince / 60000);
-            return `${type}: ${canShow ? '✅' : '⏸️'} ${canShow ? 'Can show' : `Rate limited (${minutesAgo}m ago, need ${Math.floor(limit/60000)}m)`}`;
+            return `${type}: ${canShow ? '✅' : '⏸️'} ${canShow ? 'Can show' : `Rate limited (${minutesAgo}m ago, need ${Math.floor(limit / 60000)}m)`}`;
           })
         );
 
         // Get blind approval detector stats
         const detectorStats = blindApprovalDetector.getStats();
-        
+
         // Get today's metrics
         const today = new Date().toISOString().split('T')[0];
         const metrics = metricsRepository ? await metricsRepository.getDailyMetrics(today) : null;
-        
+
         const message = `🔍 Alert System Diagnostics\n\n` +
           `📊 Snooze Status:\n` +
           `   ${isSnoozed ? '⏸️ SNOOZED' : '✅ Active'}\n` +
-          (isSnoozed && snoozeState.snoozeUntil 
+          (isSnoozed && snoozeState.snoozeUntil
             ? `   Until: ${new Date(snoozeState.snoozeUntil).toLocaleString()}\n`
             : '') +
           `\n⏱️ Rate Limits:\n` +
@@ -827,9 +894,9 @@ function registerCommands(context: vscode.ExtensionContext): void {
           `\n📈 Today's Metrics:\n` +
           (metrics
             ? `   AI Percentage: ${metrics.aiPercentage.toFixed(1)}%\n` +
-              `   Avg Review Time: ${metrics.averageReviewTime.toFixed(0)}ms\n` +
-              `   Total Events: ${metrics.totalEvents}\n` +
-              `   Manual Lines: ${metrics.totalManualLines}`
+            `   Avg Review Time: ${metrics.averageReviewTime.toFixed(0)}ms\n` +
+            `   Total Events: ${metrics.totalEvents}\n` +
+            `   Manual Lines: ${metrics.totalManualLines}`
             : '   No metrics yet') +
           `\n\n💡 Issues Found:\n` +
           (isSnoozed ? '   ⚠️ Alerts are snoozed - no alerts will show\n' : '') +

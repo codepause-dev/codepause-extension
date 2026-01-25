@@ -328,7 +328,7 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
       // CRITICAL: Check detectionMethod FIRST - it has absolute priority
       // This ensures correct categorization even for old events with wrong flags
 
-      // Inline Autocomplete: Real-time suggestions
+      // Inline Autocomplete: Real-time suggestions (Copilot, Cursor inline)
       if (detectionMethod === 'inline-completion-api' || event.eventType === 'suggestion-accepted') {
         modes.inline.lines += lines;
         modes.inline.events++;
@@ -339,9 +339,13 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
           }
         }
       }
-      // Chat/Paste Mode: Large code blocks that are NOT from AI agents
-      // This captures user copy/paste from ChatGPT web, Claude web, etc.
-      // IMPORTANT: Check this BEFORE agent mode to override old isAgentMode flags
+      // Agent Mode: Large AI completions in OPEN files (Gravity fast mode, etc.)
+      // OR files modified while closed by AI agents
+      else if (detectionMethod === 'large-paste' && event.fileWasOpen !== false) {
+        modes.agent.lines += totalAIActivity;
+        modes.agent.events++;
+      }
+      // Chat/Paste Mode: Large code blocks in CLOSED files (manual paste from ChatGPT web, etc.)
       else if (detectionMethod === 'large-paste') {
         modes.chatPaste.lines += lines;
         modes.chatPaste.events++;
@@ -492,14 +496,29 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
       const today = this.getTodayDateString();
       const config = await this.configRepository.getUserConfig();
 
+      // Get actual review time from FileReviewSessionTracker if available
+      let actualReviewTime: number | undefined = undefined;
+      if (this.metricsCollector) {
+        const fileReviewSessionTracker = this.metricsCollector.getFileReviewSessionTracker();
+        if (fileReviewSessionTracker) {
+          const session = fileReviewSessionTracker.getSession(filePath);
+          if (session && session.totalTimeInFocus > 0) {
+            // Use the actual time the user spent reviewing the file
+            actualReviewTime = session.totalTimeInFocus;
+          }
+        }
+      }
+
       // Update the file review status to mark as reviewed with MANUAL method
       // This distinguishes from automatic review detection
+      // Pass actualReviewTime so manual reviews contribute to average review time
       await this.metricsRepository.markFileAsReviewed(
         filePath,
         tool,
         today,
         config.experienceLevel,
-        'manual' // NEW: Mark as manually reviewed (user clicked button)
+        'manual', // NEW: Mark as manually reviewed (user clicked button)
+        actualReviewTime // CRITICAL: Include actual time spent reviewing
       );
 
       // CRITICAL FIX: Update the in-memory cache to reflect the reviewed status
@@ -515,7 +534,8 @@ export class DashboardProvider implements vscode.WebviewViewProvider {
               reviewScore: 100,
               reviewQuality: 'thorough' as any,
               linesSinceReview: 0,
-              lastReviewedAt: Date.now()
+              lastReviewedAt: Date.now(),
+              totalReviewTime: actualReviewTime // Also update cache with actual review time
             });
           } else {
             // Create cache entry if none exists (e.g., after extension reload)

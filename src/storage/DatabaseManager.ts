@@ -1580,29 +1580,36 @@ export class DatabaseManager implements IDatabaseManager {
     };
   }
 
-  async markFileAsReviewed(filePath: string, tool: string, date: string, developerLevel: string = 'mid', reviewMethod: 'manual' | 'automatic' = 'manual'): Promise<void> {
+  async markFileAsReviewed(filePath: string, tool: string, date: string, developerLevel: string = 'mid', reviewMethod: 'manual' | 'automatic' = 'manual', actualReviewTime?: number): Promise<void> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
 
     const now = Date.now();
 
-    // Get the file's lines_changed to calculate expected review time
-    // sql.js returns arrays. Index 7 = lines_generated, Index 26 = lines_changed
-    const fileQuery = this.db.prepare(`
-      SELECT * FROM file_review_status
-      WHERE file_path = ? AND tool = ? AND date = ?
-    `);
-    const fileData = fileQuery.get([filePath, tool, date]) as number[] | undefined;
+    // CRITICAL FIX: Use actual review time if provided, otherwise calculate expected time
+    // actualReviewTime comes from FileReviewSessionTracker (real time user spent)
+    // expectedReviewTime is calculated based on lines (fallback for manual reviews)
+    let finalReviewTime: number;
 
-    // Calculate expected review time based on lines changed and developer level
-    // Lines changed = additions + |deletions| - this reflects actual review effort
-    // Junior: 600ms per line, Mid: 400ms per line, Senior: 200ms per line
-    const msPerLine = developerLevel === 'senior' ? 200 : developerLevel === 'junior' ? 600 : 400;
+    if (actualReviewTime !== undefined && actualReviewTime > 0) {
+      // Use actual time from tracking session
+      finalReviewTime = actualReviewTime;
+    } else {
+      // Fallback: Calculate expected review time based on lines changed
+      const fileQuery = this.db.prepare(`
+        SELECT * FROM file_review_status
+        WHERE file_path = ? AND tool = ? AND date = ?
+      `);
+      const fileData = fileQuery.get([filePath, tool, date]) as number[] | undefined;
 
-    // Use lines_changed if available, otherwise fall back to lines_generated
-    const linesForReview = fileData?.[26] || fileData?.[7] || 50;
-    const expectedReviewTime = Math.max(5000, linesForReview * msPerLine); // Min 5 seconds
+      // Junior: 600ms per line, Mid: 400ms per line, Senior: 200ms per line
+      const msPerLine = developerLevel === 'senior' ? 200 : developerLevel === 'junior' ? 600 : 400;
+
+      // Use lines_changed if available, otherwise fall back to lines_generated
+      const linesForReview = fileData?.[26] || fileData?.[7] || 50;
+      finalReviewTime = Math.max(5000, linesForReview * msPerLine); // Min 5 seconds
+    }
 
 
     const stmt = this.db.prepare(`
@@ -1618,6 +1625,6 @@ export class DatabaseManager implements IDatabaseManager {
       WHERE file_path = ? AND tool = ? AND date = ?
     `);
 
-    stmt.run([reviewMethod, now, expectedReviewTime, now, filePath, tool, date]);
+    stmt.run([reviewMethod, now, finalReviewTime, now, filePath, tool, date]);
   }
 }
