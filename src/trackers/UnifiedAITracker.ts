@@ -36,6 +36,8 @@ export class UnifiedAITracker extends BaseTracker {
 
   // BUG #2 FIX: Path to persistent baseline storage file
   private baselinesFilePath: string | null = null;
+  private baselinesSaveTimer: NodeJS.Timeout | null = null;
+  private readonly BASELINES_SAVE_DEBOUNCE_MS = 1000;
 
   constructor(onEvent: (event: unknown) => void) {
     // Use 'ai' as unified source (not tool-specific)
@@ -70,8 +72,17 @@ export class UnifiedAITracker extends BaseTracker {
     }
   }
 
-  // BUG #2 FIX: Save baselines to persistent storage
   private savePersistedBaselines(): void {
+    if (this.baselinesSaveTimer) {
+      clearTimeout(this.baselinesSaveTimer);
+    }
+
+    this.baselinesSaveTimer = setTimeout(() => {
+      this.doSavePersistedBaselines();
+    }, this.BASELINES_SAVE_DEBOUNCE_MS);
+  }
+
+  private doSavePersistedBaselines(): void {
     try {
       if (!this.baselinesFilePath) {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -290,7 +301,6 @@ export class UnifiedAITracker extends BaseTracker {
     const filePath = event.document.uri.fsPath;
     this.recentTextChanges.set(filePath, Date.now());
 
-    // Batch all changes from this event to detect if AI-generated
     let totalTextLength = 0;
     let totalRangeLength = 0;
     let combinedText = '';
@@ -613,11 +623,9 @@ export class UnifiedAITracker extends BaseTracker {
           const { execSync } = require('child_process');
           const relativePath = filePath.replace(workspaceFolder + '/', '');
 
-          // Check if we're in a git repo and get diff
           try {
             execSync('git rev-parse --git-dir', { cwd: workspaceFolder, stdio: 'ignore' });
 
-            // Use git diff to get only the actual added/removed lines
             const diffResult = execSync(`git diff HEAD --numstat -- "${relativePath}" 2>/dev/null`, {
               cwd: workspaceFolder,
               encoding: 'utf-8'
@@ -627,7 +635,28 @@ export class UnifiedAITracker extends BaseTracker {
               const [added, removed] = diffResult.split(/\s+/);
               linesAdded = parseInt(added, 10) || 0;
               linesRemoved = parseInt(removed, 10) || 0;
-              this.log(`[PROCESS-CHANGE] Git diff: +${linesAdded} -${linesRemoved}`);
+
+              try {
+                const fetchHeadPath = path.join(workspaceFolder, '.git', 'FETCH_HEAD');
+                const mergeHeadPath = path.join(workspaceFolder, '.git', 'MERGE_HEAD');
+                const now = Date.now();
+
+                for (const markerPath of [fetchHeadPath, mergeHeadPath]) {
+                  try {
+                    const stats = fs.statSync(markerPath);
+                    if (now - stats.mtimeMs < 30000) {
+                      isGitOperation = true;
+                      linesAdded = 0;
+                      linesRemoved = 0;
+                      break;
+                    }
+                  } catch {
+                    // Marker file doesn't exist
+                  }
+                }
+              } catch {
+                // Error checking git markers
+              }
             } else {
               // Check if file is tracked (no diff means no changes to committed version)
               try {
@@ -659,12 +688,8 @@ export class UnifiedAITracker extends BaseTracker {
       // Fallback: Use baseline tracking if git diff didn't work
       // This ensures AI detection works even in non-git projects
       if (linesAdded === 0 && linesRemoved === 0) {
-        // Special case: Git operation (pull, merge, etc.) - skip AI detection
         if (isGitOperation) {
-          // Update baseline for future tracking, but don't emit AI event
           this.fileBaselines.set(filePath, currentLineCount);
-          this.savePersistedBaselines();
-          this.log(`[PROCESS-CHANGE] Git operation - baseline updated to ${currentLineCount}, skipping AI detection`);
           return;
         }
         const baselineLineCount = this.fileBaselines.get(filePath);
@@ -872,7 +897,12 @@ export class UnifiedAITracker extends BaseTracker {
     // Clear text change tracking
     this.recentTextChanges.clear();
 
-    // Clear baseline and cumulative tracking maps
+    if (this.baselinesSaveTimer) {
+      clearTimeout(this.baselinesSaveTimer);
+      this.baselinesSaveTimer = null;
+    }
+
+    this.fileBaselines.clear();
     this.fileBaselines.clear();
     this.cumulativeAILines.clear();
 
