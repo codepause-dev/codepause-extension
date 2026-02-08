@@ -143,8 +143,8 @@ export abstract class BaseTracker implements ITracker {
     return `${this.tool}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   }
 
-  protected log(_message: string, ..._args: unknown[]): void {
-    // Logging disabled in production
+  protected log(message: string, ...args: unknown[]): void {
+    console.log(`[CodePause:${this.tool}]`, message, ...args);
   }
 
   protected logError(message: string, error?: unknown): void {

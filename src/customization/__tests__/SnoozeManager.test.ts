@@ -330,7 +330,7 @@ describe('SnoozeManager', () => {
     it('should return remaining time status', async () => {
       mockConfigRepo.getSnoozeState.mockResolvedValue({
         snoozed: true,
-        snoozeUntil: Date.now() + 3600000 // 1 hour
+        snoozeUntil: Date.now() + 3660000 // 61 minutes (buffer to ensure "hour" is shown)
       });
 
       const status = await snoozeManager.getSnoozeStatus();

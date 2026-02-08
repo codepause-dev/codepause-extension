@@ -2,7 +2,7 @@
   "name": "code-pause",
   "displayName": "CodePause",
   "description": "Pause. Review. Own your code. Balance AI assistance with skill development.",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "codepause",
   "icon": "resources/codepause-icon.png",
   "repository": {

@@ -21,6 +21,11 @@ export class UnifiedAITracker extends BaseTracker {
   private recentFileChanges: Map<string, { timestamp: number; timer: NodeJS.Timeout }> = new Map();
   private readonly FILE_CHANGE_DEBOUNCE_MS = 5000; // 5 seconds
 
+  // Track recent text change events (user edits, AI completions) to prevent double counting
+  // Key: filePath, Value: timestamp of last text change event
+  private recentTextChanges: Map<string, number> = new Map();
+  private readonly TEXT_CHANGE_DEBOUNCE_MS = 2000; // 2 seconds
+
   // Track baseline line counts per file (established when file is opened)
   // This baseline stays CONSTANT while the file is being tracked for AI modifications
   private fileBaselines: Map<string, number> = new Map();
@@ -31,6 +36,8 @@ export class UnifiedAITracker extends BaseTracker {
 
   // BUG #2 FIX: Path to persistent baseline storage file
   private baselinesFilePath: string | null = null;
+  private baselinesSaveTimer: NodeJS.Timeout | null = null;
+  private readonly BASELINES_SAVE_DEBOUNCE_MS = 1000;
 
   constructor(onEvent: (event: unknown) => void) {
     // Use 'ai' as unified source (not tool-specific)
@@ -65,8 +72,17 @@ export class UnifiedAITracker extends BaseTracker {
     }
   }
 
-  // BUG #2 FIX: Save baselines to persistent storage
   private savePersistedBaselines(): void {
+    if (this.baselinesSaveTimer) {
+      clearTimeout(this.baselinesSaveTimer);
+    }
+
+    this.baselinesSaveTimer = setTimeout(() => {
+      this.doSavePersistedBaselines();
+    }, this.BASELINES_SAVE_DEBOUNCE_MS);
+  }
+
+  private doSavePersistedBaselines(): void {
     try {
       if (!this.baselinesFilePath) {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -281,7 +297,10 @@ export class UnifiedAITracker extends BaseTracker {
       return;
     }
 
-    // Batch all changes from this event to detect if AI-generated
+    // Track this text change event to prevent double counting with file watcher
+    const filePath = event.document.uri.fsPath;
+    this.recentTextChanges.set(filePath, Date.now());
+
     let totalTextLength = 0;
     let totalRangeLength = 0;
     let combinedText = '';
@@ -523,14 +542,23 @@ export class UnifiedAITracker extends BaseTracker {
 
     this.log(`[FILE-CHANGE] FileSystemWatcher triggered for: ${fileName}`);
 
-    // Skip if file is currently open in editor
-    // Open files receive text change events; closed files need file watcher
-    if (this.openFiles.has(filePath)) {
-      this.log(`[FILE-CHANGE] SKIPPED - file is open in editor: ${fileName}`);
-      return;
-    }
+    const isFileOpen = this.openFiles.has(filePath);
 
-    this.log(`[FILE-CHANGE] Processing external change for: ${fileName}`);
+    // Deduplication: Skip file watcher if there was a recent text change event
+    // This prevents double counting when user edits trigger both handlers
+    if (isFileOpen) {
+      const lastTextChange = this.recentTextChanges.get(filePath) || 0;
+      const timeSinceTextChange = Date.now() - lastTextChange;
+
+      if (timeSinceTextChange < this.TEXT_CHANGE_DEBOUNCE_MS) {
+        this.log(`[FILE-CHANGE] SKIPPED - recent text change ${timeSinceTextChange}ms ago, likely duplicate: ${fileName}`);
+        return;
+      }
+
+      this.log(`[FILE-CHANGE] File is open but no recent text change, processing external modification: ${fileName}`);
+    } else {
+      this.log(`[FILE-CHANGE] File is closed, processing external change: ${fileName}`);
+    }
 
     // Debounce rapid file changes (AI agents often make multiple quick writes)
     const existing = this.recentFileChanges.get(filePath);
@@ -587,6 +615,7 @@ export class UnifiedAITracker extends BaseTracker {
       const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
       let linesAdded = 0;
       let linesRemoved = 0;
+      let isGitOperation = false; // Track if change came from git operation (pull, merge, etc.)
 
       // Try to use git diff to get ACTUAL changed lines (not total file lines)
       if (workspaceFolder) {
@@ -594,11 +623,9 @@ export class UnifiedAITracker extends BaseTracker {
           const { execSync } = require('child_process');
           const relativePath = filePath.replace(workspaceFolder + '/', '');
 
-          // Check if we're in a git repo and get diff
           try {
             execSync('git rev-parse --git-dir', { cwd: workspaceFolder, stdio: 'ignore' });
 
-            // Use git diff to get only the actual added/removed lines
             const diffResult = execSync(`git diff HEAD --numstat -- "${relativePath}" 2>/dev/null`, {
               cwd: workspaceFolder,
               encoding: 'utf-8'
@@ -608,7 +635,28 @@ export class UnifiedAITracker extends BaseTracker {
               const [added, removed] = diffResult.split(/\s+/);
               linesAdded = parseInt(added, 10) || 0;
               linesRemoved = parseInt(removed, 10) || 0;
-              this.log(`[PROCESS-CHANGE] Git diff: +${linesAdded} -${linesRemoved}`);
+
+              try {
+                const fetchHeadPath = path.join(workspaceFolder, '.git', 'FETCH_HEAD');
+                const mergeHeadPath = path.join(workspaceFolder, '.git', 'MERGE_HEAD');
+                const now = Date.now();
+
+                for (const markerPath of [fetchHeadPath, mergeHeadPath]) {
+                  try {
+                    const stats = fs.statSync(markerPath);
+                    if (now - stats.mtimeMs < 30000) {
+                      isGitOperation = true;
+                      linesAdded = 0;
+                      linesRemoved = 0;
+                      break;
+                    }
+                  } catch {
+                    // Marker file doesn't exist
+                  }
+                }
+              } catch {
+                // Error checking git markers
+              }
             } else {
               // Check if file is tracked (no diff means no changes to committed version)
               try {
@@ -616,14 +664,16 @@ export class UnifiedAITracker extends BaseTracker {
                   cwd: workspaceFolder,
                   stdio: 'ignore'
                 });
-                // File is tracked but no diff = no changes since last commit
-                this.log(`[PROCESS-CHANGE] File tracked but no diff, using baseline method`);
+                // File is tracked but no diff = change came from git operation (pull, merge, commit, rebase, checkout)
+                // HEAD moved to new commit, so file now matches HEAD
+                this.log(`[PROCESS-CHANGE] File tracked with no diff vs HEAD - git operation detected (pull/merge/etc), will skip AI detection`);
+                isGitOperation = true;
                 linesAdded = 0;
                 linesRemoved = 0;
               } catch {
                 // New untracked file - use current line count
                 linesAdded = currentLineCount;
-                this.log(`[PROCESS-CHANGE] New file: ${linesAdded} lines`);
+                this.log(`[PROCESS-CHANGE] New untracked file: ${linesAdded} lines`);
               }
             }
           } catch {
@@ -638,6 +688,10 @@ export class UnifiedAITracker extends BaseTracker {
       // Fallback: Use baseline tracking if git diff didn't work
       // This ensures AI detection works even in non-git projects
       if (linesAdded === 0 && linesRemoved === 0) {
+        if (isGitOperation) {
+          this.fileBaselines.set(filePath, currentLineCount);
+          return;
+        }
         const baselineLineCount = this.fileBaselines.get(filePath);
 
         if (baselineLineCount === undefined) {
@@ -840,7 +894,15 @@ export class UnifiedAITracker extends BaseTracker {
     }
     this.recentFileChanges.clear();
 
-    // Clear baseline and cumulative tracking maps
+    // Clear text change tracking
+    this.recentTextChanges.clear();
+
+    if (this.baselinesSaveTimer) {
+      clearTimeout(this.baselinesSaveTimer);
+      this.baselinesSaveTimer = null;
+    }
+
+    this.fileBaselines.clear();
     this.fileBaselines.clear();
     this.cumulativeAILines.clear();
 

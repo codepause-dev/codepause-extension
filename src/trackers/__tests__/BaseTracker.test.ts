@@ -305,13 +305,17 @@ describe('BaseTracker', () => {
   });
 
   describe('Logging', () => {
-    it('should not output debug logs in production', () => {
+    it('should output debug logs with tool name prefix', () => {
       const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
 
       tracker.testLog('test message', 'arg1', 'arg2');
 
-      // Debug logging is disabled in production
-      expect(consoleSpy).not.toHaveBeenCalled();
+      expect(consoleSpy).toHaveBeenCalledWith(
+        '[CodePause:copilot]',
+        'test message',
+        'arg1',
+        'arg2'
+      );
 
       consoleSpy.mockRestore();
     });
