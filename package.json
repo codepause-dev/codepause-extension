@@ -218,7 +218,7 @@
     "@types/jest": "^30.0.0",
     "@types/node": "^20.19.27",
     "@types/sql.js": "^1.4.9",
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "^1.109.0",
     "@typescript-eslint/eslint-plugin": "^6.x",
     "@typescript-eslint/parser": "^6.x",
     "@vscode/test-electron": "^2.3.0",
