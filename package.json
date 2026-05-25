@@ -228,7 +228,7 @@
     "typescript": "^5.3.0"
   },
   "dependencies": {
-    "date-fns": "^4.1.0",
+    "date-fns": "^4.3.0",
     "sql.js": "^1.13.0"
   }
 }
